@@ -48,7 +48,6 @@ jobs:
           with open("endpoints.yml", "r", encoding="utf-8") as f:
               data = yaml.safe_load(f) or {}
 
-          # endpoints.yml besitzt einen Top-Level-Key "endpoints".
           endpoints = data.get("endpoints", {})
 
           if not isinstance(endpoints, dict):
@@ -56,33 +55,6 @@ jobs:
                   "FEHLER: endpoints.yml enthält kein gültiges "
                   "'endpoints:' Dictionary."
               )
-
-          def version_key(version):
-              """
-              Erzeugt einen möglichst brauchbaren Sortierschlüssel
-              für Versionsnummern wie:
-
-                  22
-                  21
-                  2026.2
-                  13.6.0
-                  25.10
-
-              Nicht numerische Bestandteile werden ebenfalls berücksichtigt.
-              """
-              version = str(version)
-
-              parts = re.findall(r'\d+|[A-Za-z]+', version)
-
-              result = []
-
-              for part in parts:
-                  if part.isdigit():
-                      result.append((0, int(part)))
-                  else:
-                      result.append((1, part.lower()))
-
-              return result
 
           targets = []
 
@@ -96,12 +68,6 @@ jobs:
 
               if not wanted_os:
                   print("WARNING: Target ohne os übersprungen.")
-                  continue
-
-              if not flavors:
-                  print(
-                      f"WARNING: Keine Flavors für {wanted_os} angegeben."
-                  )
                   continue
 
               for wanted_flavor in flavors:
@@ -131,20 +97,23 @@ jobs:
                       if endpoint_flavor != wanted_flavor:
                           continue
 
-                      files = endpoint.get("files", [])
-
-                      if "initrd" not in files:
+                      if "initrd" not in endpoint.get("files", []):
                           continue
 
                       path = str(
                           endpoint.get("path", "")
                       ).strip()
 
-                      if "/releases/download/" not in path:
+                      match = re.match(
+                          r"^/([^/]+)/releases/download/([^/]+)$",
+                          path
+                      )
+
+                      if not match:
                           continue
 
                       matches.append(
-                          (name, endpoint)
+                          (name, endpoint, match.groups())
                       )
 
                   if not matches:
@@ -154,36 +123,17 @@ jobs:
                       )
                       continue
 
-                  # Falls mehrere Versionen vorhanden sind:
-                  # höchste Version auswählen.
+                  # Höchste Version auswählen.
                   matches.sort(
-                      key=lambda item: version_key(
+                      key=lambda item: str(
                           item[1].get("version", "")
                       ),
                       reverse=True
                   )
 
-                  name, endpoint = matches[0]
+                  name, endpoint, path_info = matches[0]
 
-                  path = endpoint["path"].rstrip("/")
-
-                  # Beispiel:
-                  # /ubuntu-squash/releases/download/22-8770cb66
-                  # /debian-squash/releases/download/2026.2-6fd5ce88
-
-                  match = re.match(
-                      r"^/([^/]+)/releases/download/([^/]+)$",
-                      path
-                  )
-
-                  if not match:
-                      print(
-                          f"WARNING: Kann Release-Pfad nicht "
-                          f"interpretieren: {path}"
-                      )
-                      continue
-
-                  repository, release = match.groups()
+                  repository, release = path_info
 
                   source_url = (
                       "https://github.com/"
@@ -194,10 +144,7 @@ jobs:
                   )
 
                   version = str(
-                      endpoint.get(
-                          "version",
-                          release
-                      )
+                      endpoint.get("version", release)
                   )
 
                   release_tag = (
@@ -222,8 +169,7 @@ jobs:
                   print(
                       f"OK: {wanted_os}/{wanted_flavor} -> "
                       f"{name} "
-                      f"(Version {version}, "
-                      f"Release {release})"
+                      f"(Version {version}, Release {release})"
                   )
 
           if not targets:
@@ -232,10 +178,7 @@ jobs:
               )
 
           print()
-          print("============================================================")
-          print("Gefundene Targets")
-          print("============================================================")
-
+          print("Gefundene Targets:")
           print(
               json.dumps(
                   targets,
@@ -244,25 +187,16 @@ jobs:
               )
           )
 
-          matrix = {
-              "include": targets
-          }
+          # Nur das Array als GitHub-Output ausgeben.
+          matrix = json.dumps(targets)
 
           with open(
               os.environ["GITHUB_OUTPUT"],
               "a",
               encoding="utf-8"
           ) as f:
-
-              f.write(
-                  "matrix=" +
-                  json.dumps(
-                      json.dumps(matrix)
-                  ) +
-                  "\n"
-              )
+              f.write(f"matrix={matrix}\n")
           PY
-
 
 
   patch:
