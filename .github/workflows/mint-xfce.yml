@@ -1,4 +1,4 @@
-name: Build Linux Mint XFCE timezone initrd
+name: Linux Mint XFCE timezone initrd
 
 on:
   workflow_dispatch:
@@ -9,7 +9,6 @@ on:
 permissions:
   contents: write
 
-
 jobs:
 
   discover:
@@ -17,50 +16,38 @@ jobs:
     runs-on: ubuntu-latest
 
     outputs:
-      endpoint: ${{ steps.find.outputs.endpoint }}
       version: ${{ steps.find.outputs.version }}
-      path: ${{ steps.find.outputs.path }}
       source_url: ${{ steps.find.outputs.source_url }}
       release_tag: ${{ steps.find.outputs.release_tag }}
-      release_exists: ${{ steps.check.outputs.exists }}
+      exists: ${{ steps.check.outputs.exists }}
 
     steps:
 
       - name: Checkout
         uses: actions/checkout@v6
 
-      - name: Install dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y python3-yaml
+      - name: Install Python YAML
+        run: pip3 install pyyaml
 
       - name: Download endpoints.yml
         run: |
-          curl \
-            --fail \
-            --location \
-            --retry 5 \
-            --retry-delay 2 \
-            "https://raw.githubusercontent.com/netbootxyz/netboot.xyz/development/endpoints.yml" \
+          curl -fsSL \
+            https://raw.githubusercontent.com/netbootxyz/netboot.xyz/development/endpoints.yml \
             -o endpoints.yml
 
       - name: Find latest Mint XFCE
         id: find
-        run: |
-          python3 scripts/find-mint-xfce.py
+        run: python3 scripts/find-mint-xfce.py
 
-      - name: Check existing release
+      - name: Check release
         id: check
         env:
           GH_TOKEN: ${{ github.token }}
           RELEASE_TAG: ${{ steps.find.outputs.release_tag }}
         run: |
-          if gh release view "$RELEASE_TAG" \
-            --repo "$GITHUB_REPOSITORY" \
-            >/dev/null 2>&1
-          then
+          if gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
             echo "exists=true" >> "$GITHUB_OUTPUT"
-            echo "Release exists: $RELEASE_TAG"
+            echo "Release already exists: $RELEASE_TAG"
           else
             echo "exists=false" >> "$GITHUB_OUTPUT"
             echo "Release does not exist: $RELEASE_TAG"
@@ -71,7 +58,7 @@ jobs:
     name: Patch initrd
     needs: discover
 
-    if: needs.discover.outputs.release_exists == 'false'
+    if: needs.discover.outputs.exists == 'false'
 
     runs-on: ubuntu-latest
 
@@ -83,111 +70,42 @@ jobs:
       - name: Install dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y \
-            cpio \
-            zstd \
-            file
+          sudo apt-get install -y cpio zstd file
 
-      - name: Download original initrd
+      - name: Download initrd
         env:
           SOURCE_URL: ${{ needs.discover.outputs.source_url }}
         run: |
-          echo "Downloading:"
-          echo "$SOURCE_URL"
-
-          curl \
-            --fail \
-            --location \
+          curl -fsSL \
             --retry 5 \
-            --retry-delay 2 \
-            --output initrd \
-            "$SOURCE_URL"
+            "$SOURCE_URL" \
+            -o initrd
 
-          echo
-          echo "Downloaded:"
-          ls -lh initrd
-
-          echo
           file initrd
-
-      - name: Make patcher executable
-        run: |
-          chmod +x scripts/patch-initrd.sh
+          ls -lh initrd
 
       - name: Patch initrd
         run: |
-          ./scripts/patch-initrd.sh \
-            initrd \
-            initrd.timezone
+          ./scripts/patch-initrd.sh initrd initrd.timezone
 
-      - name: Verify patched initrd
+      - name: Verify initrd
         run: |
-          test -f initrd.timezone
           test -s initrd.timezone
-
-          echo "Patched initrd:"
+          file initrd.timezone
           ls -lh initrd.timezone
 
-          file initrd.timezone
+      - name: Create checksum
+        run: sha256sum initrd.timezone > SHA256SUMS
 
-      - name: Create checksums
-        run: |
-          sha256sum initrd.timezone > SHA256SUMS
-
-      - name: Create source information
-        env:
-          ENDPOINT: ${{ needs.discover.outputs.endpoint }}
-          VERSION: ${{ needs.discover.outputs.version }}
-          SOURCE_PATH: ${{ needs.discover.outputs.path }}
-          SOURCE_URL: ${{ needs.discover.outputs.source_url }}
-          RELEASE_TAG: ${{ needs.discover.outputs.release_tag }}
-        run: |
-          cat > SOURCE.txt <<EOF
-Linux Mint XFCE timezone-patched initrd
-
-Distribution: Linux Mint
-Flavor: XFCE
-Architecture: amd64
-
-netboot.xyz endpoint:
-${ENDPOINT}
-
-Mint version:
-${VERSION}
-
-ubuntu-squash path:
-${SOURCE_PATH}
-
-Original initrd:
-${SOURCE_URL}
-
-Patched release:
-${RELEASE_TAG}
-
-Timezone patch:
-scripts/patch-initrd.sh
-
-Kernel parameter:
-mint_tz=Europe/Berlin
-EOF
-
-          echo "SOURCE.txt:"
-          cat SOURCE.txt
-
-          echo
-          echo "SHA256SUMS:"
-          cat SHA256SUMS
-
-      - name: Upload patched artifact
+      - name: Upload artifact
         uses: actions/upload-artifact@v6
         with:
           name: initrd-timezone
-          if-no-files-found: error
           compression-level: 0
+          if-no-files-found: error
           path: |
             initrd.timezone
             SHA256SUMS
-            SOURCE.txt
 
 
   release:
@@ -196,24 +114,23 @@ EOF
       - discover
       - patch
 
-    if: needs.discover.outputs.release_exists == 'false'
+    if: needs.discover.outputs.exists == 'false'
 
     runs-on: ubuntu-latest
 
     steps:
 
-      - name: Download patched artifact
+      - name: Download artifact
         uses: actions/download-artifact@v7
         with:
           name: initrd-timezone
           path: release-assets
 
-      - name: Show release assets
+      - name: Show files
         run: |
-          echo "Release assets:"
           find release-assets -type f -exec ls -lh {} \;
 
-      - name: Create GitHub Release
+      - name: Create release
         env:
           GH_TOKEN: ${{ github.token }}
           RELEASE_TAG: ${{ needs.discover.outputs.release_tag }}
@@ -224,5 +141,4 @@ EOF
             --title "Linux Mint XFCE ${VERSION} - timezone patched" \
             --generate-notes \
             release-assets/initrd.timezone \
-            release-assets/SHA256SUMS \
-            release-assets/SOURCE.txt
+            release-assets/SHA256SUMS
