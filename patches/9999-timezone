@@ -1,0 +1,43 @@
+#!/bin/sh
+
+tz=""
+
+for arg in $(cat /proc/cmdline); do
+    case "$arg" in
+        timezone=*)
+            tz="${arg#timezone=}"
+            ;;
+    esac
+done
+
+if [ -z "${tz}" ]; then
+    exit 0
+fi
+
+case "${tz}" in
+    /*|*..*|*" "*)
+        echo "timezone: invalid timezone: ${tz}" >&2
+        exit 0
+        ;;
+esac
+
+if [ ! -f "/usr/share/zoneinfo/${tz}" ]; then
+    echo "timezone: unknown timezone: ${tz}" >&2
+    exit 0
+fi
+
+echo "timezone: live-config setting timezone to ${tz}"
+
+rm -f /etc/localtime
+
+ln -s \
+    "/usr/share/zoneinfo/${tz}" \
+    /etc/localtime
+
+printf '%s\n' "${tz}" > /etc/timezone
+
+echo "timezone: live-config final localtime:"
+ls -l /etc/localtime 2>&1 || true
+
+echo "timezone: live-config final timezone:"
+cat /etc/timezone 2>&1 || true
