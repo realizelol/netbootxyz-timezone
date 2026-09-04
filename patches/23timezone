@@ -30,7 +30,7 @@ for arg in $(cat /proc/cmdline); do
 done
 
 
-# Kein Parameter -> normales Casper-Verhalten
+# Kein timezone= Parameter -> nichts verändern
 if [ -z "$tz" ]; then
     exit 0
 fi
@@ -42,7 +42,7 @@ fi
 
 case "$tz" in
     /*|*..*|*" "*)
-        echo "timezone: ungültiger Wert: $tz" >&2
+        echo "timezone: invalid value: $tz" >&2
         exit 0
         ;;
 esac
@@ -53,7 +53,7 @@ esac
 # ============================================================
 
 if [ ! -f "/root/usr/share/zoneinfo/$tz" ]; then
-    echo "timezone: unbekannte Zeitzone: $tz" >&2
+    echo "timezone: unknown timezone: $tz" >&2
     exit 0
 fi
 
@@ -62,7 +62,7 @@ fi
 # Set timezone in Live filesystem
 # ============================================================
 
-echo "timezone: setze Zeitzone auf $tz"
+echo "timezone: setting timezone to $tz"
 
 rm -f /root/etc/localtime
 
