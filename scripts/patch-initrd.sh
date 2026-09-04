@@ -414,10 +414,7 @@ if (( CASPER == 1 )); then
     # Install hook
     # --------------------------------------------------------
 
-    install -m 0755 \
-        "$PATCH" \
-        "$CASPER_DIR/23timezone"
-    sed -i -e '1{/^timezone_setup()/d}' -e '{/^}/d}' -e 's/\breturn 0\b/exit 0/g' -e 's/\blocal \b//g' "$PATCH" > "$CASPER_DIR/23timezone"
+    sed -e '1{/^timezone_setup()/d}' -e '{/^}/d}' -e 's/\breturn 0\b/exit 0/g' -e 's/\blocal \b//g' "$PATCH" > "$CASPER_DIR/23timezone"
     chmod 755 "$CASPER_DIR/23timezone"
 
     echo "Installed:"
