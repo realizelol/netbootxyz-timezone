@@ -5,15 +5,20 @@ set -euo pipefail
 ###############################################################################
 # Generic Live Initrd Timezone Patcher
 #
-# Supports:
-#   - Debian/Ubuntu/Mint live-boot
-#   - Ubuntu/Mint casper
-#
 # Kernel command line:
 #   timezone=Europe/Berlin
 #
-# The timezone is applied to the final live root filesystem after it has
-# been mounted.
+# Supported:
+#   - Debian/Kali live-boot
+#   - Ubuntu/Mint casper
+#
+# Kali/live-boot:
+#   timezone_setup is executed as the LAST initramfs action immediately before
+#   handing control to the real init via run-init.
+#
+# Casper:
+#   Existing Casper-specific timezone hook is installed so the build/action
+#   pipeline remains functional. Casper is deliberately not used for Kali.
 ###############################################################################
 
 if [[ ${EUID} -ne 0 ]]; then
@@ -85,8 +90,6 @@ elif file "${INPUT}" | grep -qi 'gzip compressed'; then
     COMPRESSION="gzip"
 elif file "${INPUT}" | grep -qi 'XZ compressed'; then
     COMPRESSION="xz"
-elif file "${INPUT}" | grep -qi 'ASCII cpio archive'; then
-    COMPRESSION="none"
 elif file "${INPUT}" | grep -qi 'cpio archive'; then
     COMPRESSION="none"
 else
@@ -118,7 +121,7 @@ case "${COMPRESSION}" in
 esac
 
 ###############################################################################
-# Extract
+# Extract initrd
 ###############################################################################
 
 echo
@@ -128,28 +131,32 @@ mkdir -p "${ROOT}"
 
 case "${COMPRESSION}" in
     zstd)
-        zstd -q -d -c "${INPUT}" | (
-            cd "${ROOT}"
-            cpio -idmu --quiet
-        )
+        zstd -q -d -c "${INPUT}" |
+            (
+                cd "${ROOT}"
+                cpio -idmu --quiet
+            )
         ;;
     lzop)
-        lzop -d -c "${INPUT}" | (
-            cd "${ROOT}"
-            cpio -idmu --quiet
-        )
+        lzop -d -c "${INPUT}" |
+            (
+                cd "${ROOT}"
+                cpio -idmu --quiet
+            )
         ;;
     gzip)
-        gzip -d -c "${INPUT}" | (
-            cd "${ROOT}"
-            cpio -idmu --quiet
-        )
+        gzip -d -c "${INPUT}" |
+            (
+                cd "${ROOT}"
+                cpio -idmu --quiet
+            )
         ;;
     xz)
-        xz -d -c "${INPUT}" | (
-            cd "${ROOT}"
-            cpio -idmu --quiet
-        )
+        xz -d -c "${INPUT}" |
+            (
+                cd "${ROOT}"
+                cpio -idmu --quiet
+            )
         ;;
     none)
         (
@@ -168,13 +175,17 @@ echo "==> Erkenne Live-System ..."
 
 LIVE_SYSTEM=""
 
-# Debian/Ubuntu/Mint live-boot
+# Kali / Debian / live-boot
+#
+# IMPORTANT:
+# This branch is deliberately independent from Casper.
 if [[ -f "${ROOT}/usr/lib/live/boot/9990-main.sh" ]] &&
-   [[ -d "${ROOT}/usr/lib/live/boot" ]]; then
+   [[ -d "${ROOT}/usr/lib/live/boot" ]] &&
+   [[ -f "${ROOT}/usr/bin/live-boot" ]]; then
 
     LIVE_SYSTEM="live-boot"
 
-# Casper (Ubuntu/Mint)
+# Ubuntu / Mint / Casper
 elif [[ -f "${ROOT}/etc/casper.conf" ]] &&
      [[ -f "${ROOT}/scripts/casper" ]] &&
      [[ -f "${ROOT}/scripts/casper-functions" ]]; then
@@ -196,32 +207,14 @@ fi
 echo "OK: ${LIVE_SYSTEM} erkannt."
 
 ###############################################################################
-# Repository patch files
+# Repository patches
 ###############################################################################
 
 LIVE_BOOT_PATCH="${REPO_ROOT}/patches/0023-timezone"
 CASPER_PATCH="${REPO_ROOT}/patches/casper-bottom-99timezone"
 
 ###############################################################################
-# Validate repository patches
-###############################################################################
-
-case "${LIVE_SYSTEM}" in
-
-    live-boot)
-        [[ -f "${LIVE_BOOT_PATCH}" ]] ||
-            die "Patch-Datei fehlt: ${LIVE_BOOT_PATCH}"
-        ;;
-
-    casper)
-        [[ -f "${CASPER_PATCH}" ]] ||
-            die "Patch-Datei fehlt: ${CASPER_PATCH}"
-        ;;
-
-esac
-
-###############################################################################
-# Remove previous versions
+# Remove old timezone hooks
 ###############################################################################
 
 echo
@@ -235,13 +228,16 @@ rm -f \
     "${ROOT}/scripts/casper-bottom/99timezone"
 
 ###############################################################################
-# Install live-boot patch
+# Kali / Debian live-boot
 ###############################################################################
 
 if [[ "${LIVE_SYSTEM}" == "live-boot" ]]; then
 
     echo
     echo "==> Installiere live-boot Timezone-Hook ..."
+
+    [[ -f "${LIVE_BOOT_PATCH}" ]] ||
+        die "Patch-Datei fehlt: ${LIVE_BOOT_PATCH}"
 
     mkdir -p "${ROOT}/usr/lib/live/boot"
 
@@ -252,25 +248,29 @@ if [[ "${LIVE_SYSTEM}" == "live-boot" ]]; then
     echo "    ${ROOT}/usr/lib/live/boot/0023-timezone"
 
     ###########################################################################
-    # Patch 9990-main.sh
+    # Patch the top-level init.
     #
-    # Important:
-    # timezone_setup must run AFTER mount_images_in_directory(), because only
-    # then ${rootmnt} represents the actual live root filesystem.
+    # Do NOT patch 9990-main.sh.
+    #
+    # timezone_setup must execute immediately before run-init so that all
+    # live-boot root/overlay construction has already completed.
     ###########################################################################
 
-    MAIN="${ROOT}/usr/lib/live/boot/9990-main.sh"
+    INIT="${ROOT}/init"
 
-    [[ -f "${MAIN}" ]] ||
-        die "9990-main.sh nicht gefunden."
+    [[ -f "${INIT}" ]] ||
+        die "Top-level init nicht gefunden."
 
-    if grep -q '^[[:space:]]*timezone_setup[[:space:]]*$' "${MAIN}"; then
+    echo
+    echo "==> Patch init ..."
+
+    if grep -q '^[[:space:]]*timezone_setup[[:space:]]*$' "${INIT}"; then
+
         echo "    timezone_setup bereits vorhanden."
+
     else
 
-        echo "==> Patch 9990-main.sh ..."
-
-        python3 - "${MAIN}" <<'PY'
+        python3 - "${INIT}" <<'PY'
 import sys
 
 path = sys.argv[1]
@@ -278,44 +278,43 @@ path = sys.argv[1]
 with open(path, "r", encoding="utf-8") as f:
     data = f.read()
 
-needle = 'mount_images_in_directory "${livefs_root}" "${rootmnt}" "${mac}"'
-
-pos = data.find(needle)
-
-if pos == -1:
-    raise SystemExit(
-        "mount_images_in_directory-Aufruf in 9990-main.sh nicht gefunden."
-    )
-
-# Find end of the containing line.
-line_end = data.find("\n", pos)
-
-if line_end == -1:
-    line_end = len(data)
-
-insert = (
-    "\n"
-    "\t# Apply kernel-command-line timezone after the live rootfs "
-    "has been mounted/constructed.\n"
-    "\ttimezone_setup\n"
+needle = (
+    'exec run-init ${drop_caps} "${rootmnt}" "${init}" "$@" '
+    '<"${rootmnt}/dev/console" >"${rootmnt}/dev/console" 2>&1'
 )
 
-data = data[:line_end + 1] + insert + data[line_end + 1:]
+if needle not in data:
+    raise SystemExit(
+        "exec run-init-Zeile in init nicht gefunden."
+    )
+
+insert = (
+    '# Apply kernel-command-line timezone after the final live root\n'
+    '# filesystem and all virtual filesystems have been prepared.\n'
+    'timezone_setup\n'
+    '\n'
+)
+
+data = data.replace(
+    needle,
+    insert + needle,
+    1
+)
 
 with open(path, "w", encoding="utf-8") as f:
     f.write(data)
 PY
 
-        echo "    timezone_setup eingefügt."
+        echo "    timezone_setup unmittelbar vor exec run-init eingefügt."
 
     fi
 
     ###########################################################################
-    # Verify live-boot patch
+    # Verify Kali hook
     ###########################################################################
 
     echo
-    echo "==> Prüfe installierten Timezone-Hook ..."
+    echo "==> Prüfe installierten live-boot Timezone-Hook ..."
 
     [[ -x "${ROOT}/usr/lib/live/boot/0023-timezone" ]] ||
         die "Timezone-Hook wurde nicht korrekt installiert."
@@ -330,23 +329,65 @@ PY
 
     echo "OK."
 
-    echo
-    echo "==> Ergebnis 9990-main.sh:"
+    ###########################################################################
+    # Verify init patch
+    ###########################################################################
 
-    grep -n -A8 -B5 \
+    echo
+    echo "==> Prüfe timezone_setup in init ..."
+
+    grep -q '^[[:space:]]*timezone_setup[[:space:]]*$' \
+        "${INIT}" ||
+        die "timezone_setup wurde nicht in init eingefügt."
+
+    python3 - "${INIT}" <<'PY'
+import sys
+
+path = sys.argv[1]
+
+with open(path, "r", encoding="utf-8") as f:
+    data = f.read()
+
+tz = data.find("\ntimezone_setup\n")
+run = data.find(
+    'exec run-init ${drop_caps} "${rootmnt}" "${init}" "$@" '
+    '<"${rootmnt}/dev/console" >"${rootmnt}/dev/console" 2>&1'
+)
+
+if tz == -1:
+    raise SystemExit("timezone_setup nicht gefunden.")
+
+if run == -1:
+    raise SystemExit("exec run-init nicht gefunden.")
+
+if tz > run:
+    raise SystemExit(
+        "timezone_setup steht NICHT vor exec run-init."
+    )
+PY
+
+    echo "OK."
+
+    echo
+    echo "==> Ergebnis init:"
+
+    grep -n -A8 -B8 \
         'timezone_setup' \
-        "${MAIN}" || true
+        "${INIT}" || true
 
 fi
 
 ###############################################################################
-# Install casper patch
+# Mint / Ubuntu Casper
 ###############################################################################
 
 if [[ "${LIVE_SYSTEM}" == "casper" ]]; then
 
     echo
     echo "==> Installiere Casper Timezone-Hook ..."
+
+    [[ -f "${CASPER_PATCH}" ]] ||
+        die "Patch-Datei fehlt: ${CASPER_PATCH}"
 
     mkdir -p "${ROOT}/scripts/casper-bottom"
 
@@ -355,10 +396,6 @@ if [[ "${LIVE_SYSTEM}" == "casper" ]]; then
         "${ROOT}/scripts/casper-bottom/99timezone"
 
     echo "    ${ROOT}/scripts/casper-bottom/99timezone"
-
-    ###########################################################################
-    # Verify Casper patch
-    ###########################################################################
 
     echo
     echo "==> Prüfe installierten Casper Timezone-Hook ..."
