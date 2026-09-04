@@ -19,6 +19,10 @@ env:
 
 jobs:
 
+  # ==========================================================
+  # DISCOVER
+  # ==========================================================
+
   discover:
     name: Find latest Linux Mint XFCE
     runs-on: ubuntu-latest
@@ -29,6 +33,7 @@ jobs:
       path: ${{ steps.discover.outputs.path }}
       source_url: ${{ steps.discover.outputs.source_url }}
       release_tag: ${{ steps.discover.outputs.release_tag }}
+      release_exists: ${{ steps.release_check.outputs.exists }}
 
     steps:
 
@@ -52,6 +57,7 @@ jobs:
             "$ENDPOINTS_URL" \
             -o endpoints.yml
 
+          echo
           echo "Downloaded endpoints.yml:"
           wc -l endpoints.yml
 
@@ -112,11 +118,9 @@ jobs:
 
           def version_key(item):
 
-              value = item["version"]
-
               parts = []
 
-              for part in re.split(r'[^0-9]+', value):
+              for part in re.split(r"[^0-9]+", item["version"]):
 
                   if part:
                       parts.append(int(part))
@@ -128,7 +132,9 @@ jobs:
 
           selected = matches[0]
 
+          print()
           print("Found Mint XFCE endpoints:")
+          print()
 
           for item in matches:
               print(
@@ -137,9 +143,11 @@ jobs:
                   f"path={item['path']}"
               )
 
+
           print()
           print("Selected:")
           print(selected)
+          print()
 
 
           name = selected["name"]
@@ -147,16 +155,7 @@ jobs:
           path = selected["path"]
 
 
-          # Remove leading/trailing slashes.
           path_clean = path.strip("/")
-
-          # Extract ubuntu-squash release identifier.
-          #
-          # Example:
-          #
-          # /ubuntu-squash/releases/download/22-8770cb66/
-          #
-          # -> 22-8770cb66
 
           marker = "releases/download/"
 
@@ -165,18 +164,26 @@ jobs:
                   f"Unexpected endpoint path: {path}"
               )
 
-          source_release = path_clean.split(marker, 1)[1].strip("/")
+
+          source_release = (
+              path_clean
+              .split(marker, 1)[1]
+              .strip("/")
+          )
 
 
           source_url = (
               "https://github.com/"
-              + "netbootxyz/ubuntu-squash/releases/download/"
+              "netbootxyz/ubuntu-squash/releases/download/"
               + source_release
               + "/initrd"
           )
 
 
-          # Unique identifier for our patched release.
+          # Example:
+          #
+          # mint-xfce-22-8770cb66
+          #
           release_tag = (
               "mint-xfce-"
               + version
@@ -207,14 +214,45 @@ jobs:
           echo "Release  : ${{ steps.discover.outputs.release_tag }}"
 
 
+      - name: Check whether release already exists
+        id: release_check
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ steps.discover.outputs.release_tag }}
+        run: |
+
+          if gh release view "$RELEASE_TAG" \
+              --repo "$GITHUB_REPOSITORY" \
+              >/dev/null 2>&1
+          then
+
+              echo "exists=true" >> "$GITHUB_OUTPUT"
+
+              echo
+              echo "Release already exists:"
+              echo "$RELEASE_TAG"
+
+          else
+
+              echo "exists=false" >> "$GITHUB_OUTPUT"
+
+              echo
+              echo "Release does not exist."
+
+          fi
+
+
+  # ==========================================================
+  # PATCH
+  # ==========================================================
+
   patch:
     name: Patch initrd
     needs: discover
-    runs-on: ubuntu-latest
 
-    outputs:
-      release_tag: ${{ steps.meta.outputs.release_tag }}
-      version: ${{ steps.meta.outputs.version }}
+    if: needs.discover.outputs.release_exists == 'false'
+
+    runs-on: ubuntu-latest
 
     steps:
 
@@ -233,43 +271,7 @@ jobs:
             file
 
 
-      - name: Check whether release already exists
-        id: existing
-        env:
-          GH_TOKEN: ${{ github.token }}
-          RELEASE_TAG: ${{ needs.discover.outputs.release_tag }}
-        run: |
-
-          if gh release view "$RELEASE_TAG" \
-              --repo "$GITHUB_REPOSITORY" \
-              >/dev/null 2>&1
-          then
-
-              echo "already=true" >> "$GITHUB_OUTPUT"
-
-              echo
-              echo "Release already exists:"
-              echo "$RELEASE_TAG"
-
-          else
-
-              echo "already=false" >> "$GITHUB_OUTPUT"
-
-              echo
-              echo "Release does not exist yet."
-
-          fi
-
-
-      - name: Stop because release already exists
-        if: steps.existing.outputs.already == 'true'
-        run: |
-          echo "Nothing to do."
-          exit 0
-
-
       - name: Download original initrd
-        if: steps.existing.outputs.already == 'false'
         env:
           SOURCE_URL: ${{ needs.discover.outputs.source_url }}
         run: |
@@ -286,18 +288,19 @@ jobs:
             "$SOURCE_URL"
 
           echo
+          echo "Downloaded initrd:"
           ls -lh initrd
+
+          echo
           file initrd
 
 
       - name: Make patcher executable
-        if: steps.existing.outputs.already == 'false'
         run: |
           chmod +x scripts/patch-initrd.sh
 
 
       - name: Patch initrd
-        if: steps.existing.outputs.already == 'false'
         run: |
 
           ./scripts/patch-initrd.sh \
@@ -306,7 +309,6 @@ jobs:
 
 
       - name: Create metadata
-        if: steps.existing.outputs.already == 'false'
         env:
           ENDPOINT: ${{ needs.discover.outputs.endpoint }}
           VERSION: ${{ needs.discover.outputs.version }}
@@ -319,33 +321,33 @@ jobs:
 
 
           cat > SOURCE.txt <<EOF
-          Linux Mint XFCE timezone-patched initrd
+Linux Mint XFCE timezone-patched initrd
 
-          Distribution: Linux Mint
-          Flavor: XFCE
-          Architecture: amd64
+Distribution: Linux Mint
+Flavor: XFCE
+Architecture: amd64
 
-          netboot.xyz endpoint:
-          ${ENDPOINT}
+netboot.xyz endpoint:
+${ENDPOINT}
 
-          Mint version:
-          ${VERSION}
+Mint version:
+${VERSION}
 
-          ubuntu-squash path:
-          ${PATH_VALUE}
+ubuntu-squash path:
+${PATH_VALUE}
 
-          Original initrd:
-          ${SOURCE_URL}
+Original initrd:
+${SOURCE_URL}
 
-          Patched release:
-          ${RELEASE_TAG}
+Patched release:
+${RELEASE_TAG}
 
-          Patch:
-          patches/23timezone
+Patch:
+patches/23timezone
 
-          Kernel parameter:
-          mint_tz=Europe/Berlin
-          EOF
+Kernel parameter:
+mint_tz=Europe/Berlin
+EOF
 
 
           echo
@@ -358,33 +360,32 @@ jobs:
 
 
       - name: Upload artifact
-        if: steps.existing.outputs.already == 'false'
         uses: actions/upload-artifact@v6
         with:
           name: initrd-timezone
+          if-no-files-found: error
+          compression-level: 0
           path: |
             initrd.timezone
             SHA256SUMS
             SOURCE.txt
 
 
-      - name: Set metadata outputs
-        id: meta
-        run: |
-          echo "release_tag=${{ needs.discover.outputs.release_tag }}" >> "$GITHUB_OUTPUT"
-          echo "version=${{ needs.discover.outputs.version }}" >> "$GITHUB_OUTPUT"
-
+  # ==========================================================
+  # RELEASE
+  # ==========================================================
 
   release:
     name: Create GitHub Release
-    needs: [discover, patch]
+    needs:
+      - discover
+      - patch
+
+    if: needs.discover.outputs.release_exists == 'false'
+
     runs-on: ubuntu-latest
 
     steps:
-
-      - name: Checkout
-        uses: actions/checkout@v6
-
 
       - name: Download patched artifact
         uses: actions/download-artifact@v7
@@ -393,7 +394,13 @@ jobs:
           path: release-assets
 
 
-      - name: Create release
+      - name: Show release assets
+        run: |
+          echo "Release assets:"
+          find release-assets -type f -exec ls -lh {} \;
+
+
+      - name: Create GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
           RELEASE_TAG: ${{ needs.discover.outputs.release_tag }}
