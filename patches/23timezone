@@ -1,90 +1,38 @@
 #!/bin/sh
 
-PREREQ=""
-
-prereqs()
+timezone_setup()
 {
-    echo "$PREREQ"
-}
+    tz=""
 
-case "$1" in
-    prereqs)
-        prereqs
-        exit 0
-        ;;
-esac
+    for arg in $(cat /proc/cmdline); do
+        case "$arg" in
+            timezone=*)
+                tz="${arg#timezone=}"
+                ;;
+        esac
+    done
 
+    [ -n "$tz" ] || return 0
 
-# ============================================================
-# Read timezone= from kernel command line
-# ============================================================
-
-tz=""
-
-for arg in $(cat /proc/cmdline); do
-    case "$arg" in
-        timezone=*)
-            tz="${arg#timezone=}"
+    case "$tz" in
+        /*|*..*|*" "*)
+            echo "timezone: invalid timezone: $tz" >&2
+            return 0
             ;;
     esac
-done
 
+    if [ ! -f "/root/usr/share/zoneinfo/$tz" ]; then
+        echo "timezone: unknown timezone: $tz" >&2
+        return 0
+    fi
 
-# No timezone parameter -> do nothing
-[ -n "$tz" ] || exit 0
+    echo "timezone: setting timezone to $tz"
 
+    rm -f /root/etc/localtime
 
-# ============================================================
-# Basic validation
-# ============================================================
+    ln -s \
+        "/usr/share/zoneinfo/$tz" \
+        /root/etc/localtime
 
-case "$tz" in
-    /*|*..*|*" "*)
-        echo "timezone: invalid timezone: $tz" >&2
-        exit 0
-        ;;
-esac
-
-
-# ============================================================
-# Determine live root
-# ============================================================
-
-if [ -n "${rootmnt:-}" ] && [ -d "$rootmnt" ]; then
-    TARGET_ROOT="$rootmnt"
-elif [ -d /root/etc ] && [ -d /root/usr/share/zoneinfo ]; then
-    TARGET_ROOT="/root"
-else
-    echo "timezone: live root not available" >&2
-    exit 0
-fi
-
-
-# ============================================================
-# Check timezone
-# ============================================================
-
-if [ ! -f "$TARGET_ROOT/usr/share/zoneinfo/$tz" ]; then
-    echo "timezone: unknown timezone: $tz" >&2
-    exit 0
-fi
-
-
-# ============================================================
-# Set timezone
-# ============================================================
-
-echo "timezone: setting timezone to $tz"
-
-rm -f "$TARGET_ROOT/etc/localtime"
-
-ln -s \
-    "/usr/share/zoneinfo/$tz" \
-    "$TARGET_ROOT/etc/localtime"
-
-printf '%s\n' "$tz" > "$TARGET_ROOT/etc/timezone"
-
-
-echo "timezone: successfully set $tz"
-
-exit 0
+    printf '%s\n' "$tz" > /root/etc/timezone
+}
