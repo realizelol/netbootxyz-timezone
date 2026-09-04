@@ -39,25 +39,76 @@ jobs:
           python3 <<'PY'
           import json
           import os
+          import re
           import yaml
 
           with open("config.yml", "r", encoding="utf-8") as f:
-              config = yaml.safe_load(f)
+              config = yaml.safe_load(f) or {}
 
           with open("endpoints.yml", "r", encoding="utf-8") as f:
-              endpoints = yaml.safe_load(f)
+              data = yaml.safe_load(f) or {}
+
+          # endpoints.yml besitzt einen Top-Level-Key "endpoints".
+          endpoints = data.get("endpoints", {})
+
+          if not isinstance(endpoints, dict):
+              raise SystemExit(
+                  "FEHLER: endpoints.yml enthält kein gültiges "
+                  "'endpoints:' Dictionary."
+              )
+
+          def version_key(version):
+              """
+              Erzeugt einen möglichst brauchbaren Sortierschlüssel
+              für Versionsnummern wie:
+
+                  22
+                  21
+                  2026.2
+                  13.6.0
+                  25.10
+
+              Nicht numerische Bestandteile werden ebenfalls berücksichtigt.
+              """
+              version = str(version)
+
+              parts = re.findall(r'\d+|[A-Za-z]+', version)
+
+              result = []
+
+              for part in parts:
+                  if part.isdigit():
+                      result.append((0, int(part)))
+                  else:
+                      result.append((1, part.lower()))
+
+              return result
 
           targets = []
 
           for target in config.get("targets", []):
 
-              wanted_os = str(target["os"]).lower()
+              wanted_os = str(
+                  target.get("os", "")
+              ).strip().lower()
 
               flavors = target.get("flavors", [])
 
+              if not wanted_os:
+                  print("WARNING: Target ohne os übersprungen.")
+                  continue
+
+              if not flavors:
+                  print(
+                      f"WARNING: Keine Flavors für {wanted_os} angegeben."
+                  )
+                  continue
+
               for wanted_flavor in flavors:
 
-                  wanted_flavor = str(wanted_flavor).lower()
+                  wanted_flavor = str(
+                      wanted_flavor
+                  ).strip().lower()
 
                   matches = []
 
@@ -68,11 +119,11 @@ jobs:
 
                       endpoint_os = str(
                           endpoint.get("os", "")
-                      ).lower()
+                      ).strip().lower()
 
                       endpoint_flavor = str(
                           endpoint.get("flavor", "")
-                      ).lower()
+                      ).strip().lower()
 
                       if endpoint_os != wanted_os:
                           continue
@@ -80,16 +131,16 @@ jobs:
                       if endpoint_flavor != wanted_flavor:
                           continue
 
-                      path = str(
-                          endpoint.get("path", "")
-                      )
+                      files = endpoint.get("files", [])
 
-                      if "/releases/download/" not in path:
+                      if "initrd" not in files:
                           continue
 
-                      if "initrd" not in endpoint.get(
-                          "files", []
-                      ):
+                      path = str(
+                          endpoint.get("path", "")
+                      ).strip()
+
+                      if "/releases/download/" not in path:
                           continue
 
                       matches.append(
@@ -97,45 +148,83 @@ jobs:
                       )
 
                   if not matches:
-
                       print(
                           f"WARNING: Kein Endpoint für "
                           f"{wanted_os}/{wanted_flavor} gefunden"
                       )
-
                       continue
+
+                  # Falls mehrere Versionen vorhanden sind:
+                  # höchste Version auswählen.
+                  matches.sort(
+                      key=lambda item: version_key(
+                          item[1].get("version", "")
+                      ),
+                      reverse=True
+                  )
 
                   name, endpoint = matches[0]
 
                   path = endpoint["path"].rstrip("/")
 
-                  release = path.split("/")[-1]
+                  # Beispiel:
+                  # /ubuntu-squash/releases/download/22-8770cb66
+                  # /debian-squash/releases/download/2026.2-6fd5ce88
+
+                  match = re.match(
+                      r"^/([^/]+)/releases/download/([^/]+)$",
+                      path
+                  )
+
+                  if not match:
+                      print(
+                          f"WARNING: Kann Release-Pfad nicht "
+                          f"interpretieren: {path}"
+                      )
+                      continue
+
+                  repository, release = match.groups()
 
                   source_url = (
                       "https://github.com/"
-                      "netbootxyz/ubuntu-squash/"
+                      "netbootxyz/"
+                      f"{repository}/"
                       "releases/download/"
                       f"{release}/initrd"
                   )
 
-                  release_tag = (
-                      f"{wanted_os}-{wanted_flavor}-{release}"
+                  version = str(
+                      endpoint.get(
+                          "version",
+                          release
+                      )
                   )
 
-                  targets.append({
+                  release_tag = (
+                      f"{wanted_os}-"
+                      f"{wanted_flavor}-"
+                      f"{release}"
+                  )
+
+                  result = {
                       "os": wanted_os,
                       "flavor": wanted_flavor,
                       "endpoint": name,
-                      "version": str(
-                          endpoint.get(
-                              "version",
-                              release
-                          )
-                      ),
+                      "version": version,
                       "release": release,
+                      "repository": repository,
                       "source_url": source_url,
                       "release_tag": release_tag
-                  })
+                  }
+
+                  targets.append(result)
+
+                  print(
+                      f"OK: {wanted_os}/{wanted_flavor} -> "
+                      f"{name} "
+                      f"(Version {version}, "
+                      f"Release {release})"
+                  )
 
           if not targets:
               raise SystemExit(
@@ -143,7 +232,10 @@ jobs:
               )
 
           print()
-          print("Gefundene Targets:")
+          print("============================================================")
+          print("Gefundene Targets")
+          print("============================================================")
+
           print(
               json.dumps(
                   targets,
@@ -158,7 +250,8 @@ jobs:
 
           with open(
               os.environ["GITHUB_OUTPUT"],
-              "a"
+              "a",
+              encoding="utf-8"
           ) as f:
 
               f.write(
@@ -169,6 +262,7 @@ jobs:
                   "\n"
               )
           PY
+
 
 
   patch:
