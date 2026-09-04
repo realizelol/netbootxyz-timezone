@@ -523,7 +523,7 @@ if (( CASPER == 1 )); then
         | head -n1 \
         | cut -d: -f1 \
         || true
-    )
+    )"
 
 
     [[ -n "$TZ_LINE" ]] \
