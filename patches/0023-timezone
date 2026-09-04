@@ -4,6 +4,7 @@ timezone_setup()
 {
     tz=""
 
+    # Read timezone= from the kernel command line.
     for arg in $(cat /proc/cmdline); do
         case "$arg" in
             timezone=*)
@@ -12,40 +13,46 @@ timezone_setup()
         esac
     done
 
+    # No timezone= parameter: nothing to do.
     if [ -z "$tz" ]; then
         return 0
     fi
 
+    # Basic path validation.
     case "$tz" in
         /*|*..*|*" "*)
-            echo "timezone: invalid timezone: $tz" >&2
+            echo "timezone: invalid timezone: ${tz}" >&2
             return 0
             ;;
     esac
 
-    if [ -z "${rootmnt:-}" ]; then
+    # rootmnt must point to the final live root.
+    if [ -z "${rootmnt}" ]; then
         echo "timezone: rootmnt is not set" >&2
-        return 0
-    fi
-
-    if [ ! -f "${rootmnt}/usr/share/zoneinfo/${tz}" ]; then
-        echo "timezone: unknown timezone: ${tz}" >&2
         return 0
     fi
 
     echo "timezone: rootmnt=${rootmnt}"
     echo "timezone: setting timezone to ${tz}"
 
+    # Check the timezone database in the final live root.
+    if [ ! -f "${rootmnt}/usr/share/zoneinfo/${tz}" ]; then
+        echo "timezone: unknown timezone: ${tz}" >&2
+        return 0
+    fi
+
     echo "timezone: BEFORE:"
     ls -l "${rootmnt}/etc/localtime" 2>&1 || true
     cat "${rootmnt}/etc/timezone" 2>&1 || true
 
+    # Replace the existing timezone configuration.
     rm -f "${rootmnt}/etc/localtime"
 
     ln -s \
         "/usr/share/zoneinfo/${tz}" \
         "${rootmnt}/etc/localtime"
 
+    # Debian/Ubuntu/Mint use /etc/timezone as well.
     printf '%s\n' "${tz}" > "${rootmnt}/etc/timezone"
 
     echo "timezone: AFTER:"
