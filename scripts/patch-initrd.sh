@@ -202,7 +202,7 @@ echo
 # Verify source timezone hook
 # ------------------------------------------------------------
 
-PATCH_FILE="${SCRIPT_DIR}/0023-timezone"
+PATCH_FILE="${SCRIPT_DIR}/../patches/0023-timezone"
 
 if [[ ! -f "${PATCH_FILE}" ]]; then
     echo "ERROR: Timezone-Hook nicht gefunden:"
