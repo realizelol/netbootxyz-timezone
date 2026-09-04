@@ -1,37 +1,42 @@
-#!/bin/bash
+#!/usr/bin/env bash
 
-set -e
+set -euo pipefail
 
-# ============================================================
+###############################################################################
 # Generic Live Initrd Timezone Patcher
 #
-# Kali / Debian live-boot:
-#   - install 0023-timezone
-#   - patch 9990-main.sh
-#   - call timezone_setup directly after Swap
+# Supports:
+#   - Debian/Kali live-boot
+#   - Ubuntu/Mint casper
 #
-# Ubuntu / Mint casper:
-#   - currently NOT patched
-#   - initrd is simply copied to the output
+# Installs:
+#   - usr/lib/live/boot/0023-timezone
+#   - usr/lib/live/config/9999-timezone
 #
-# Unknown initrd:
-#   - abort
-# ============================================================
+# The first hook handles the initramfs/live-boot phase.
+# The second hook runs as the final live-config component and therefore
+# restores the requested timezone after live-config/tzdata has run.
+###############################################################################
 
 if [[ ${EUID} -ne 0 ]]; then
     exec sudo "$0" "$@"
 fi
 
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd -- "${SCRIPT_DIR}/.." && pwd)"
+
+PATCH_DIR="${REPO_ROOT}/patches"
+
+TIMEZONE_HOOK="${PATCH_DIR}/0023-timezone"
+FINAL_TIMEZONE_HOOK="${PATCH_DIR}/9999-timezone"
+
 INPUT="${1:-initrd}"
 OUTPUT="${2:-initrd.timezone}"
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-
-INPUT_ABS="$(realpath "${INPUT}")"
-OUTPUT_ABS="$(realpath -m "${OUTPUT}")"
-
-WORKDIR="$(mktemp -d /tmp/timezone-patch-XXXXXX)"
+WORKDIR="$(mktemp -d /tmp/timezone-patch-XXXXXXXX)"
 ROOT="${WORKDIR}/root"
+
+COMPRESSION=""
 
 cleanup()
 {
@@ -39,6 +44,26 @@ cleanup()
 }
 
 trap cleanup EXIT
+
+###############################################################################
+# Helper functions
+###############################################################################
+
+die()
+{
+    echo "ERROR: $*" >&2
+    exit 1
+}
+
+require_cmd()
+{
+    command -v "$1" >/dev/null 2>&1 ||
+        die "Required command '$1' not found."
+}
+
+###############################################################################
+# Header
+###############################################################################
 
 echo "============================================================"
 echo " Generic Live Initrd Timezone Patcher"
@@ -48,42 +73,38 @@ echo "Input : ${INPUT}"
 echo "Output: ${OUTPUT}"
 echo
 
-# ------------------------------------------------------------
-# Required tools
-# ------------------------------------------------------------
+###############################################################################
+# Check required tools
+###############################################################################
 
 echo "==> Prüfe benötigte Werkzeuge ..."
-
-for cmd in file cpio gzip zstd xz bzip2 lz4 lzop realpath; do
-    if ! command -v "${cmd}" >/dev/null 2>&1; then
-        echo "ERROR: Required command '${cmd}' not found."
-        exit 1
-    fi
-done
-
 echo
 
-# ------------------------------------------------------------
+require_cmd file
+require_cmd cpio
+require_cmd gzip
+require_cmd xz
+require_cmd bzip2
+require_cmd zstd
+require_cmd lz4
+require_cmd lzop
+
+###############################################################################
 # Check input
-# ------------------------------------------------------------
+###############################################################################
 
 echo "==> Prüfe Input ..."
 
-if [[ ! -f "${INPUT_ABS}" ]]; then
-    echo "ERROR: Input-Datei nicht gefunden:"
-    echo "       ${INPUT_ABS}"
-    exit 1
-fi
+[[ -f "${INPUT}" ]] ||
+    die "Input initrd '${INPUT}' nicht gefunden."
 
-FILE_INFO="$(file "${INPUT_ABS}")"
+FILE_INFO="$(file "${INPUT}")"
 
 echo "${FILE_INFO}"
 
-# ------------------------------------------------------------
+###############################################################################
 # Detect compression
-# ------------------------------------------------------------
-
-COMPRESSION=""
+###############################################################################
 
 case "${FILE_INFO}" in
     *"Zstandard compressed data"*)
@@ -105,21 +126,26 @@ case "${FILE_INFO}" in
         COMPRESSION="lzo"
         ;;
     *)
-        echo
-        echo "ERROR: Nicht unterstützte Initrd-Kompression."
-        echo
-        echo "file-Ausgabe:"
-        echo "${FILE_INFO}"
-        exit 1
+        die "Unbekannte Initrd-Kompression."
         ;;
 esac
 
 echo "Compression: ${COMPRESSION}"
 echo
 
-# ------------------------------------------------------------
+###############################################################################
+# Validate patch files
+###############################################################################
+
+[[ -f "${TIMEZONE_HOOK}" ]] ||
+    die "Timezone hook nicht gefunden: ${TIMEZONE_HOOK}"
+
+[[ -f "${FINAL_TIMEZONE_HOOK}" ]] ||
+    die "Final timezone hook nicht gefunden: ${FINAL_TIMEZONE_HOOK}"
+
+###############################################################################
 # Extract initrd
-# ------------------------------------------------------------
+###############################################################################
 
 echo "==> Entpacke Initrd ..."
 
@@ -127,359 +153,280 @@ mkdir -p "${ROOT}"
 
 case "${COMPRESSION}" in
     zstd)
-        zstd -dc "${INPUT_ABS}" | (
+        zstd -d -c "${INPUT}" | (
             cd "${ROOT}"
-            cpio -idm --no-absolute-filenames
+            cpio -idmu --quiet
         )
         ;;
 
     gzip)
-        gzip -dc "${INPUT_ABS}" | (
+        gzip -d -c "${INPUT}" | (
             cd "${ROOT}"
-            cpio -idm --no-absolute-filenames
+            cpio -idmu --quiet
         )
         ;;
 
     xz)
-        xz -dc "${INPUT_ABS}" | (
+        xz -d -c "${INPUT}" | (
             cd "${ROOT}"
-            cpio -idm --no-absolute-filenames
+            cpio -idmu --quiet
         )
         ;;
 
     bzip2)
-        bzip2 -dc "${INPUT_ABS}" | (
+        bzip2 -d -c "${INPUT}" | (
             cd "${ROOT}"
-            cpio -idm --no-absolute-filenames
+            cpio -idmu --quiet
         )
         ;;
 
     lz4)
-        lz4 -dc "${INPUT_ABS}" | (
+        lz4 -d -c "${INPUT}" | (
             cd "${ROOT}"
-            cpio -idm --no-absolute-filenames
+            cpio -idmu --quiet
         )
         ;;
 
     lzo)
-        lzop -dc "${INPUT_ABS}" | (
+        lzop -d -c "${INPUT}" | (
             cd "${ROOT}"
-            cpio -idm --no-absolute-filenames
+            cpio -idmu --quiet
         )
         ;;
 esac
 
 echo
 
-# ------------------------------------------------------------
+###############################################################################
 # Detect live system
-# ------------------------------------------------------------
+###############################################################################
 
 echo "==> Erkenne Live-System ..."
 
-LIVE_BOOT_MAIN="${ROOT}/usr/lib/live/boot/9990-main.sh"
-LIVE_BOOT_DIR="${ROOT}/usr/lib/live/boot"
+LIVE_TYPE=""
 
-CASPER_CONF="${ROOT}/etc/casper.conf"
-CASPER_SCRIPT="${ROOT}/scripts/casper"
-
-# ------------------------------------------------------------
-# Kali / Debian live-boot
-# ------------------------------------------------------------
-
-if [[ -f "${LIVE_BOOT_MAIN}" ]] &&
-   grep -q 'mount_images_in_directory' "${LIVE_BOOT_MAIN}" 2>/dev/null
-then
-
-    LIVE_SYSTEM="live-boot"
-
+if [[ -f "${ROOT}/usr/lib/live/boot/9990-main.sh" ]]; then
+    LIVE_TYPE="live-boot"
     echo "OK: live-boot erkannt."
-    echo
-
-    # --------------------------------------------------------
-    # Timezone hook
-    # --------------------------------------------------------
-
-    PATCH_FILE="${SCRIPT_DIR}/../patches/0023-timezone"
-
-    if [[ ! -f "${PATCH_FILE}" ]]; then
-        echo "ERROR: Timezone-Hook nicht gefunden:"
-        echo "       ${PATCH_FILE}"
-        exit 1
-    fi
-
-    echo "==> Installiere Timezone-Hook ..."
-
-    mkdir -p "${LIVE_BOOT_DIR}"
-
-    install -m 0755 \
-        "${PATCH_FILE}" \
-        "${LIVE_BOOT_DIR}/0023-timezone"
-
-    echo "    ${LIVE_BOOT_DIR}/0023-timezone"
-
-    # --------------------------------------------------------
-    # Remove old timezone hooks
-    # --------------------------------------------------------
-
-    echo "==> Entferne alte Timezone-Hooks ..."
-
-    find "${LIVE_BOOT_DIR}" \
-        -maxdepth 1 \
-        -type f \
-        \( -name '*timezone*' -o -name '023-timezone' \) \
-        ! -name '0023-timezone' \
-        -print \
-        -delete 2>/dev/null || true
-
-    echo
-
-    # --------------------------------------------------------
-    # Verify installed hook
-    # --------------------------------------------------------
-
-    echo "==> Prüfe installierten Timezone-Hook ..."
-
-    if ! grep -q '^timezone_setup()' \
-        "${LIVE_BOOT_DIR}/0023-timezone"
-    then
-        echo "ERROR: timezone_setup() wurde nicht gefunden."
-        exit 1
-    fi
-
-    if ! grep -q '/usr/share/zoneinfo/' \
-        "${LIVE_BOOT_DIR}/0023-timezone"
-    then
-        echo "ERROR: zoneinfo-Pfad fehlt im Timezone-Hook."
-        exit 1
-    fi
-
-    echo "OK."
-    echo
-
-    # --------------------------------------------------------
-    # Patch 9990-main.sh
-    #
-    # Remove every existing invocation first.
-    # This makes the patch idempotent.
-    # --------------------------------------------------------
-
-    echo "==> Patch 9990-main.sh ..."
-
-    MAIN="${LIVE_BOOT_MAIN}"
-
-    sed -i \
-        '/^[[:space:]]*timezone_setup[[:space:]]*$/d' \
-        "${MAIN}"
-
-    MAIN_TMP="${MAIN}.tmp"
-
-    awk '
-    BEGIN {
-        inserted = 0
-    }
-
-    {
-        if (!inserted && $0 ~ /^[[:space:]]*Swap[[:space:]]*$/) {
-            print $0
-            print ""
-            print "\t# Apply kernel-command-line timezone as late as possible,"
-            print "\t# after the Live root filesystem and swap setup are complete."
-            print "\ttimezone_setup"
-            inserted = 1
-            next
-        }
-
-        print $0
-    }
-
-    END {
-        if (!inserted) {
-            exit 42
-        }
-    }
-    ' "${MAIN}" > "${MAIN_TMP}" || {
-
-        rc=$?
-
-        rm -f "${MAIN_TMP}"
-
-        if [[ ${rc} -eq 42 ]]; then
-            echo "ERROR: 'Swap' konnte in 9990-main.sh nicht gefunden werden."
-        else
-            echo "ERROR: Patch von 9990-main.sh fehlgeschlagen."
-        fi
-
-        exit 1
-    }
-
-    mv "${MAIN_TMP}" "${MAIN}"
-
-    echo "    timezone_setup eingefügt: direkt nach Swap."
-    echo
-
-    # --------------------------------------------------------
-    # Verify placement
-    # --------------------------------------------------------
-
-    echo "==> Prüfe Position von timezone_setup ..."
-
-    TIMEZONE_COUNT="$(
-        grep -c \
-            '^[[:space:]]*timezone_setup[[:space:]]*$' \
-            "${MAIN}" || true
-    )"
-
-    if [[ "${TIMEZONE_COUNT}" != "1" ]]; then
-        echo "ERROR: Erwartet genau einen timezone_setup-Aufruf."
-        echo "       Gefunden: ${TIMEZONE_COUNT}"
-        exit 1
-    fi
-
-    SWAP_LINE="$(
-        grep -n -m1 \
-            '^[[:space:]]*Swap[[:space:]]*$' \
-            "${MAIN}" |
-        cut -d: -f1
-    )"
-
-    TIMEZONE_LINE="$(
-        grep -n -m1 \
-            '^[[:space:]]*timezone_setup[[:space:]]*$' \
-            "${MAIN}" |
-        cut -d: -f1
-    )"
-
-    if [[ -z "${SWAP_LINE}" || -z "${TIMEZONE_LINE}" ]]; then
-        echo "ERROR: Swap/timezone_setup konnte nicht geprüft werden."
-        exit 1
-    fi
-
-    if (( TIMEZONE_LINE <= SWAP_LINE )); then
-        echo "ERROR: timezone_setup steht nicht nach Swap."
-        exit 1
-    fi
-
-    echo "OK:"
-    echo "    Swap            : Zeile ${SWAP_LINE}"
-    echo "    timezone_setup  : Zeile ${TIMEZONE_LINE}"
-    echo
-
-    # --------------------------------------------------------
-    # Show result
-    # --------------------------------------------------------
-
-    echo "==> Ergebnis 9990-main.sh:"
-
-    START=$((TIMEZONE_LINE - 8))
-    END=$((TIMEZONE_LINE + 12))
-
-    if (( START < 1 )); then
-        START=1
-    fi
-
-    sed -n "${START},${END}p" "${MAIN}" |
-        nl -ba -v "${START}"
-
-    echo
-
-    # --------------------------------------------------------
-    # Final verification
-    # --------------------------------------------------------
-
-    echo "==> Finale Prüfung ..."
-
-    if [[ ! -x "${LIVE_BOOT_DIR}/0023-timezone" ]]; then
-        echo "ERROR: Timezone-Hook ist nicht ausführbar."
-        exit 1
-    fi
-
-    if ! grep -q '^timezone_setup()' \
-        "${LIVE_BOOT_DIR}/0023-timezone"
-    then
-        echo "ERROR: timezone_setup() fehlt."
-        exit 1
-    fi
-
-    if ! grep -q \
-        '^[[:space:]]*timezone_setup[[:space:]]*$' \
-        "${MAIN}"
-    then
-        echo "ERROR: timezone_setup-Aufruf fehlt."
-        exit 1
-    fi
-
-    echo "OK."
-
-# ------------------------------------------------------------
-# Ubuntu / Mint casper
-#
-# Do NOT modify it yet.
-# Just pass the original initrd through.
-# ------------------------------------------------------------
-
-elif [[ -f "${CASPER_CONF}" ]] ||
-     [[ -f "${CASPER_SCRIPT}" ]]
-then
-
-    LIVE_SYSTEM="casper"
-
+elif [[ -f "${ROOT}/scripts/live" ]] &&
+     [[ -f "${ROOT}/scripts/casper" ]]; then
+    LIVE_TYPE="casper"
     echo "OK: casper erkannt."
-    echo
-    echo "==> Mint/Ubuntu-casper wird derzeit nicht gepatcht."
-    echo "    Initrd wird unverändert übernommen."
-    echo
-
-    cp -f "${INPUT_ABS}" "${OUTPUT_ABS}"
-
-    chmod 0644 "${OUTPUT_ABS}"
-
-    echo "============================================================"
-    echo " Fertig"
-    echo "============================================================"
-    echo
-    echo "Output: ${OUTPUT}"
-    echo
-    file "${OUTPUT_ABS}"
-
-    exit 0
-
-# ------------------------------------------------------------
-# Unknown
-# ------------------------------------------------------------
-
 else
-
     echo "ERROR: Kein unterstütztes Live-System erkannt."
     echo
     echo "Vorhandene relevante Dateien:"
 
     find "${ROOT}" \
-        \( \
-            -path '*/live/*' \
-            -o -path '*/casper*' \
-            -o -name '9990-main.sh' \
-            -o -name 'casper.conf' \
-        \) \
         -type f \
-        -print 2>/dev/null |
-        head -100
+        \( \
+            -path '*/live/*' -o \
+            -path '*/casper*' \
+        \) \
+        -print \
+        2>/dev/null \
+        | head -100
 
     exit 1
 fi
 
-# ------------------------------------------------------------
+echo
+
+###############################################################################
+# Install initrd timezone hook
+###############################################################################
+
+echo "==> Installiere Timezone-Hook ..."
+
+if [[ "${LIVE_TYPE}" == "live-boot" ]]; then
+
+    mkdir -p "${ROOT}/usr/lib/live/boot"
+
+    echo "    ${ROOT}/usr/lib/live/boot/0023-timezone"
+
+    cp -f \
+        "${TIMEZONE_HOOK}" \
+        "${ROOT}/usr/lib/live/boot/0023-timezone"
+
+    chmod 0755 \
+        "${ROOT}/usr/lib/live/boot/0023-timezone"
+
+else
+
+    echo "    Initrd-Hook für casper wird nicht benötigt."
+    echo "    Casper bleibt unverändert."
+fi
+
+###############################################################################
+# Install final live-config timezone hook
+###############################################################################
+
+if [[ "${LIVE_TYPE}" == "live-boot" ]]; then
+
+    echo
+    echo "==> Installiere finalen live-config Timezone-Hook ..."
+
+    mkdir -p "${ROOT}/usr/lib/live/config"
+
+    echo "    ${ROOT}/usr/lib/live/config/9999-timezone"
+
+    cp -f \
+        "${FINAL_TIMEZONE_HOOK}" \
+        "${ROOT}/usr/lib/live/config/9999-timezone"
+
+    chmod 0755 \
+        "${ROOT}/usr/lib/live/config/9999-timezone"
+
+fi
+
+###############################################################################
+# Patch live-boot 9990-main.sh
+###############################################################################
+
+if [[ "${LIVE_TYPE}" == "live-boot" ]]; then
+
+    MAIN="${ROOT}/usr/lib/live/boot/9990-main.sh"
+
+    [[ -f "${MAIN}" ]] ||
+        die "9990-main.sh nicht gefunden."
+
+    echo
+    echo "==> Patch 9990-main.sh ..."
+
+    # Remove previous timezone_setup calls.
+    sed -i \
+        '/^[[:space:]]*timezone_setup[[:space:]]*$/d' \
+        "${MAIN}"
+
+    # Remove previous timezone comments that this script may have inserted.
+    sed -i \
+        '/^[[:space:]]*# Apply kernel-command-line timezone/d' \
+        "${MAIN}"
+
+    sed -i \
+        '/^[[:space:]]*# after the Live root filesystem and swap setup are complete\./d' \
+        "${MAIN}"
+
+    # Insert after the Swap line.
+    if grep -qE '^[[:space:]]*Swap[[:space:]]*$' "${MAIN}"; then
+
+        sed -i \
+            '/^[[:space:]]*Swap[[:space:]]*$/a\
+\
+\t# Apply kernel-command-line timezone as late as possible,\
+\t# after the Live root filesystem and swap setup are complete.\
+\ttimezone_setup' \
+            "${MAIN}"
+
+        echo "    timezone_setup eingefügt: direkt nach Swap."
+
+    else
+        echo "    WARNUNG: 'Swap' nicht gefunden."
+        echo "    timezone_setup wird nicht in 9990-main.sh eingefügt."
+    fi
+
+    echo
+    echo "==> Prüfe Position von timezone_setup ..."
+
+    SWAP_LINE="$(
+        grep -nE '^[[:space:]]*Swap[[:space:]]*$' "${MAIN}" |
+        head -1 |
+        cut -d: -f1
+    )"
+
+    TZ_LINE="$(
+        grep -nE '^[[:space:]]*timezone_setup[[:space:]]*$' "${MAIN}" |
+        head -1 |
+        cut -d: -f1
+    )"
+
+    if [[ -n "${SWAP_LINE}" && -n "${TZ_LINE}" ]]; then
+
+        echo "OK:"
+        echo "    Swap            : Zeile ${SWAP_LINE}"
+        echo "    timezone_setup  : Zeile ${TZ_LINE}"
+
+        if (( TZ_LINE <= SWAP_LINE )); then
+            die "timezone_setup steht nicht nach Swap."
+        fi
+
+    else
+        echo "WARNUNG:"
+        echo "    Swap            : ${SWAP_LINE:-nicht gefunden}"
+        echo "    timezone_setup  : ${TZ_LINE:-nicht gefunden}"
+    fi
+
+    echo
+    echo "==> Ergebnis 9990-main.sh:"
+
+    if [[ -n "${TZ_LINE}" ]]; then
+        START=$(( TZ_LINE - 8 ))
+        END=$(( TZ_LINE + 8 ))
+
+        (( START < 1 )) && START=1
+
+        nl -ba "${MAIN}" |
+            sed -n "${START},${END}p"
+    fi
+
+fi
+
+###############################################################################
+# Verify hooks
+###############################################################################
+
+echo
+echo "==> Prüfe installierte Hooks ..."
+
+if [[ "${LIVE_TYPE}" == "live-boot" ]]; then
+
+    [[ -x "${ROOT}/usr/lib/live/boot/0023-timezone" ]] ||
+        die "0023-timezone wurde nicht korrekt installiert."
+
+    echo "OK: usr/lib/live/boot/0023-timezone"
+
+    [[ -x "${ROOT}/usr/lib/live/config/9999-timezone" ]] ||
+        die "9999-timezone wurde nicht korrekt installiert."
+
+    echo "OK: usr/lib/live/config/9999-timezone"
+
+fi
+
+###############################################################################
+# Show live-config component ordering
+###############################################################################
+
+if [[ "${LIVE_TYPE}" == "live-boot" ]]; then
+
+    echo
+    echo "==> Prüfe live-config Komponenten ..."
+
+    if [[ -d "${ROOT}/usr/lib/live/config" ]]; then
+
+        echo
+        find "${ROOT}/usr/lib/live/config" \
+            -maxdepth 1 \
+            -type f \
+            -printf '%f\n' |
+            sort |
+            tail -20
+
+        if [[ -f "${ROOT}/usr/lib/live/config/9999-timezone" ]]; then
+            echo
+            echo "OK: 9999-timezone ist als finaler Hook vorhanden."
+        fi
+
+    fi
+fi
+
+###############################################################################
 # Repack initrd
-# ------------------------------------------------------------
+###############################################################################
 
 echo
 echo "==> Packe Initrd ..."
 
-# IMPORTANT:
-# Always use an absolute temporary output path.
-# Otherwise a 'cd "${ROOT}"' subshell changes the output location.
-
-TMP_OUTPUT="${OUTPUT_ABS}.tmp"
+TMP_OUTPUT="${OUTPUT}.tmp"
 
 rm -f "${TMP_OUTPUT}"
 
@@ -489,74 +436,86 @@ case "${COMPRESSION}" in
         (
             cd "${ROOT}"
             find . -print0 |
-                cpio --null -o -H newc |
-                zstd -T0 -19 -o "${TMP_OUTPUT}"
-        )
+                cpio --null -o -H newc --quiet |
+                zstd -T0 -19 -c
+        ) > "${TMP_OUTPUT}"
         ;;
 
     gzip)
         (
             cd "${ROOT}"
             find . -print0 |
-                cpio --null -o -H newc |
-                gzip -9 > "${TMP_OUTPUT}"
-        )
+                cpio --null -o -H newc --quiet |
+                gzip -9 -c
+        ) > "${TMP_OUTPUT}"
         ;;
 
     xz)
         (
             cd "${ROOT}"
             find . -print0 |
-                cpio --null -o -H newc |
-                xz -T0 -9 > "${TMP_OUTPUT}"
-        )
+                cpio --null -o -H newc --quiet |
+                xz -c -9
+        ) > "${TMP_OUTPUT}"
         ;;
 
     bzip2)
         (
             cd "${ROOT}"
             find . -print0 |
-                cpio --null -o -H newc |
-                bzip2 -9 > "${TMP_OUTPUT}"
-        )
+                cpio --null -o -H newc --quiet |
+                bzip2 -9 -c
+        ) > "${TMP_OUTPUT}"
         ;;
 
     lz4)
         (
             cd "${ROOT}"
             find . -print0 |
-                cpio --null -o -H newc |
-                lz4 -z > "${TMP_OUTPUT}"
-        )
+                cpio --null -o -H newc --quiet |
+                lz4 -9 -c
+        ) > "${TMP_OUTPUT}"
         ;;
 
     lzo)
         (
             cd "${ROOT}"
             find . -print0 |
-                cpio --null -o -H newc |
-                lzop -9 > "${TMP_OUTPUT}"
-        )
+                cpio --null -o -H newc --quiet |
+                lzop -9 -c
+        ) > "${TMP_OUTPUT}"
         ;;
 
 esac
 
-if [[ ! -f "${TMP_OUTPUT}" ]]; then
-    echo "ERROR: Initrd wurde nicht erzeugt:"
-    echo "       ${TMP_OUTPUT}"
-    exit 1
-fi
+[[ -s "${TMP_OUTPUT}" ]] ||
+    die "Erzeugte Initrd ist leer."
 
-mv -f "${TMP_OUTPUT}" "${OUTPUT_ABS}"
+mv -f \
+    "${TMP_OUTPUT}" \
+    "${OUTPUT}"
 
-chmod 0644 "${OUTPUT_ABS}"
+chmod 0644 "${OUTPUT}"
+
+###############################################################################
+# Final verification
+###############################################################################
+
+echo
+echo "==> Finale Prüfung ..."
+
+[[ -f "${OUTPUT}" ]] ||
+    die "Output-Datei wurde nicht erzeugt."
+
+ls -lh "${OUTPUT}"
+
+echo
+echo "Kompression der erzeugten Initrd:"
+file "${OUTPUT}"
 
 echo
 echo "============================================================"
-echo " Fertig"
+echo " Fertig."
 echo "============================================================"
 echo
 echo "Output: ${OUTPUT}"
-echo
-file "${OUTPUT_ABS}"
-echo
