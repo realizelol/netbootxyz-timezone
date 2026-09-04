@@ -1,0 +1,103 @@
+#!/bin/sh
+
+PREREQ=""
+prereqs() {
+    echo "$PREREQ"
+}
+
+case $1 in
+prereqs)
+    prereqs
+    exit 0
+    ;;
+esac
+
+if [ -z "${rootmnt:-}" ]; then
+    echo "timezone: rootmnt is not set" >&2
+    rootmnt="/root"
+fi
+echo "timezone: rootmnt=${rootmnt}"
+
+# ----------------------------------------------------------
+# Read timezone= from kernel command line
+# ----------------------------------------------------------
+tz=""
+for arg in $(cat /proc/cmdline 2>/dev/null); do
+    case "${arg}" in
+        timezone=*)
+            tz="${arg#timezone=}"
+            ;;
+    esac
+done
+if [ -z "${tz}" ]; then
+    echo "timezone: no timezone= kernel parameter"
+    exit 0
+fi
+echo "timezone: requested timezone=${tz}"
+
+# ----------------------------------------------------------
+# Validate timezone string
+# ----------------------------------------------------------
+case "${tz}" in
+    /*|*..*|*" "*|*"	"*)
+        echo "timezone: invalid timezone: ${tz}" >&2
+        exit 0
+        ;;
+esac
+
+# ----------------------------------------------------------
+# Verify root filesystem structure
+# ----------------------------------------------------------
+if [ ! -d "${rootmnt}" ]; then
+    echo "timezone: rootmnt does not exist: ${rootmnt}" >&2
+    exit 0
+fi
+if [ ! -d "${rootmnt}/etc" ]; then
+    echo "timezone: ${rootmnt}/etc does not exist" >&2
+    exit 0
+fi
+if [ ! -d "${rootmnt}/usr/share/zoneinfo" ]; then
+    echo "timezone: zoneinfo directory not available yet" >&2
+    echo "timezone: ${rootmnt}/usr/share/zoneinfo" >&2
+    exit 0
+fi
+
+# ----------------------------------------------------------
+# Verify requested timezone file exists
+# ----------------------------------------------------------
+if [ ! -f "${rootmnt}/usr/share/zoneinfo/${tz}" ]; then
+    echo "timezone: unknown timezone: ${tz}" >&2
+    exit 0
+fi
+
+# ----------------------------------------------------------
+# Diagnostics: BEFORE
+# ----------------------------------------------------------
+echo "timezone: BEFORE:"
+if [ -e "${rootmnt}/etc/localtime" ] || [ -L "${rootmnt}/etc/localtime" ]; then
+    ls -l "${rootmnt}/etc/localtime" 2>&1 || true
+else
+    echo "timezone: /etc/localtime does not exist"
+fi
+if [ -f "${rootmnt}/etc/timezone" ]; then
+    cat "${rootmnt}/etc/timezone" 2>&1 || true
+else
+    echo "timezone: /etc/timezone does not exist"
+fi
+
+# ----------------------------------------------------------
+# Set /etc/localtime & /etc/timezone
+# ----------------------------------------------------------
+rm -f "${rootmnt}/etc/localtime"
+ln -s "/usr/share/zoneinfo/${tz}" "${rootmnt}/etc/localtime"
+printf '%s\n' "${tz}" > "${rootmnt}/etc/timezone"
+
+# ----------------------------------------------------------
+# Diagnostics: AFTER
+# ----------------------------------------------------------
+echo "timezone: AFTER:"
+ls -l "${rootmnt}/etc/localtime" 2>&1 || true
+cat "${rootmnt}/etc/timezone" 2>&1 || true
+echo "timezone: timezone successfully set to ${tz}"
+
+exit 0
