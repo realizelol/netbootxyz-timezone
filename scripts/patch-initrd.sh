@@ -1,20 +1,35 @@
 #!/usr/bin/env bash
 
-set -Eeuo pipefail
+set -euo pipefail
 
 ###############################################################################
 # Generic Live Initrd Timezone Patcher
 #
 # Supports:
-#   - Ubuntu/Mint/casper based initrds
-#   - Debian/Kali/live-boot based initrds
+#   - Debian/Ubuntu/Mint casper initrds
+#   - Debian/Kali live-boot initrds
+#   - gzip
+#   - xz
+#   - zstd
+#   - lz4
+#   - lzop
 #
-# Adds:
-#   timezone=Europe/Berlin
+# The timezone is read from:
 #
-# The timezone hook is executed as the FINAL initramfs action immediately
-# before the final "exec run-init".
+#     timezone=Europe/Berlin
+#
+# and applied as the FINAL initramfs action immediately before:
+#
+#     exec run-init ...
+#
+# This is intentional: live-boot/casper may modify /etc/localtime while
+# constructing the final live root. By applying the timezone immediately
+# before run-init, the final live root is modified after those operations.
 ###############################################################################
+
+if [[ ${EUID} -ne 0 ]]; then
+    exec sudo "$0" "$@"
+fi
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd -- "${SCRIPT_DIR}/.." && pwd)"
@@ -22,32 +37,15 @@ REPO_ROOT="$(cd -- "${SCRIPT_DIR}/.." && pwd)"
 INPUT="${1:-${REPO_ROOT}/initrd}"
 OUTPUT="${2:-${REPO_ROOT}/initrd.timezone}"
 
-PATCH_FILE="${REPO_ROOT}/patches/0023-timezone"
-
-WORKDIR=""
-ROOT=""
-
-###############################################################################
-# Root privileges
-###############################################################################
-
-if [[ ${EUID} -ne 0 ]]; then
-    exec sudo "$0" "$@"
-fi
-
-###############################################################################
-# Cleanup
-###############################################################################
+WORK="$(mktemp -d -t timezone-patch-XXXXXXXXXX)"
+ROOT="${WORK}/root"
 
 cleanup()
 {
-    if [[ -n "${WORKDIR}" && -d "${WORKDIR}" ]]; then
-        rm -rf "${WORKDIR}"
-    fi
+    rm -rf "${WORK}"
 }
 
 trap cleanup EXIT
-trap 'echo "ERROR: patch-initrd.sh failed at line ${LINENO}." >&2' ERR
 
 ###############################################################################
 # Helpers
@@ -61,12 +59,17 @@ die()
 
 info()
 {
-    echo
     echo "==> $*"
 }
 
+require_cmd()
+{
+    command -v "$1" >/dev/null 2>&1 ||
+        die "Required command '$1' not found."
+}
+
 ###############################################################################
-# Header
+# Validate arguments
 ###############################################################################
 
 echo "============================================================"
@@ -76,50 +79,19 @@ echo
 echo "Input : ${INPUT}"
 echo "Output: ${OUTPUT}"
 
-###############################################################################
-# Check dependencies
-###############################################################################
-
-command -v file >/dev/null 2>&1 ||
-    die "Required command 'file' not found."
-
-command -v cpio >/dev/null 2>&1 ||
-    die "Required command 'cpio' not found."
-
-command -v zstd >/dev/null 2>&1 ||
-    die "Required command 'zstd' not found."
-
-command -v gzip >/dev/null 2>&1 ||
-    die "Required command 'gzip' not found."
-
-command -v xz >/dev/null 2>&1 ||
-    die "Required command 'xz' not found."
-
-command -v bzip2 >/dev/null 2>&1 ||
-    die "Required command 'bzip2' not found."
-
-command -v lz4 >/dev/null 2>&1 ||
-    die "Required command 'lz4' not found."
-
-command -v lzop >/dev/null 2>&1 ||
-    die "Required command 'lzop' not found."
-
-command -v python3 >/dev/null 2>&1 ||
-    die "Required command 'python3' not found."
-
 [[ -f "${INPUT}" ]] ||
-    die "Input initrd does not exist: ${INPUT}"
+    die "Input initrd not found: ${INPUT}"
 
-[[ -f "${PATCH_FILE}" ]] ||
-    die "Timezone patch does not exist: ${PATCH_FILE}"
+mkdir -p "${ROOT}"
 
 ###############################################################################
-# Determine compression
+# Detect compression
 ###############################################################################
 
 info "Prüfe Input ..."
 
 FILE_INFO="$(file -b "${INPUT}")"
+
 echo "${INPUT}: ${FILE_INFO}"
 
 COMPRESSION=""
@@ -128,14 +100,11 @@ case "${FILE_INFO}" in
     *"Zstandard compressed data"*)
         COMPRESSION="zstd"
         ;;
-    *"gzip compressed data"*)
-        COMPRESSION="gzip"
-        ;;
     *"XZ compressed data"*)
         COMPRESSION="xz"
         ;;
-    *"bzip2 compressed data"*)
-        COMPRESSION="bzip2"
+    *"gzip compressed data"*)
+        COMPRESSION="gzip"
         ;;
     *"LZ4 compressed data"*)
         COMPRESSION="lz4"
@@ -143,25 +112,44 @@ case "${FILE_INFO}" in
     *"LZO compressed data"*)
         COMPRESSION="lzop"
         ;;
-    *"ASCII cpio archive"*)
-        COMPRESSION="none"
-        ;;
-    *"cpio archive"*)
-        COMPRESSION="none"
-        ;;
     *)
-        die "Unsupported initrd format: ${FILE_INFO}"
+        # Uncompressed cpio archives are also valid initrds.
+        if cpio -it < "${INPUT}" >/dev/null 2>&1; then
+            COMPRESSION="none"
+        else
+            die "Unsupported initrd format: ${FILE_INFO}"
+        fi
         ;;
 esac
 
+echo "Compression: ${COMPRESSION}"
+
 ###############################################################################
-# Create temporary workspace
+# Required tools
 ###############################################################################
 
-WORKDIR="$(mktemp -d -t timezone-patch-XXXXXXXXXX)"
-ROOT="${WORKDIR}/root"
+require_cmd file
+require_cmd cpio
 
-mkdir -p "${ROOT}"
+case "${COMPRESSION}" in
+    zstd)
+        require_cmd zstd
+        ;;
+    xz)
+        require_cmd xz
+        ;;
+    gzip)
+        require_cmd gzip
+        ;;
+    lz4)
+        require_cmd lz4
+        ;;
+    lzop)
+        require_cmd lzop
+        ;;
+    none)
+        ;;
+esac
 
 ###############################################################################
 # Extract initrd
@@ -171,31 +159,40 @@ info "Entpacke Initrd ..."
 
 case "${COMPRESSION}" in
     zstd)
-        zstd -q -d -c "${INPUT}" |
-            (cd "${ROOT}" && cpio -idm --no-absolute-filenames)
-        ;;
-    gzip)
-        gzip -dc "${INPUT}" |
-            (cd "${ROOT}" && cpio -idm --no-absolute-filenames)
+        zstd -q -d -c "${INPUT}" | (
+            cd "${ROOT}"
+            cpio -idm --no-absolute-filenames
+        )
         ;;
     xz)
-        xz -dc "${INPUT}" |
-            (cd "${ROOT}" && cpio -idm --no-absolute-filenames)
+        xz -d -c "${INPUT}" | (
+            cd "${ROOT}"
+            cpio -idm --no-absolute-filenames
+        )
         ;;
-    bzip2)
-        bzip2 -dc "${INPUT}" |
-            (cd "${ROOT}" && cpio -idm --no-absolute-filenames)
+    gzip)
+        gzip -d -c "${INPUT}" | (
+            cd "${ROOT}"
+            cpio -idm --no-absolute-filenames
+        )
         ;;
     lz4)
-        lz4 -dc "${INPUT}" |
-            (cd "${ROOT}" && cpio -idm --no-absolute-filenames)
+        lz4 -d -c "${INPUT}" | (
+            cd "${ROOT}"
+            cpio -idm --no-absolute-filenames
+        )
         ;;
     lzop)
-        lzop -dc "${INPUT}" |
-            (cd "${ROOT}" && cpio -idm --no-absolute-filenames)
+        lzop -d -c "${INPUT}" | (
+            cd "${ROOT}"
+            cpio -idm --no-absolute-filenames
+        )
         ;;
     none)
-        (cd "${ROOT}" && cpio -idm --no-absolute-filenames < "${INPUT}")
+        (
+            cd "${ROOT}"
+            cpio -idm --no-absolute-filenames < "${INPUT}"
+        )
         ;;
 esac
 
@@ -205,281 +202,280 @@ esac
 
 info "Erkenne Live-System ..."
 
-IS_CASPER=0
-IS_LIVE_BOOT=0
+LIVE_BOOT=0
+CASPER=0
 
-if [[ -d "${ROOT}/casper" ||
-      -d "${ROOT}/usr/share/initramfs-tools/scripts/casper" ||
-      -f "${ROOT}/scripts/casper" ||
-      -f "${ROOT}/scripts/casper-bottom/ORDER" ||
-      -d "${ROOT}/scripts/casper-bottom" ]]; then
-    IS_CASPER=1
-    echo "OK: casper erkannt."
-fi
-
-if [[ -d "${ROOT}/usr/lib/live/boot" ||
-      -d "${ROOT}/lib/live/boot" ||
-      -f "${ROOT}/usr/bin/live-boot" ||
-      -f "${ROOT}/usr/lib/live/boot/9990-main.sh" ]]; then
-    IS_LIVE_BOOT=1
+if [[ -f "${ROOT}/usr/bin/live-boot" ]] ||
+   [[ -d "${ROOT}/usr/lib/live/boot" ]] ||
+   [[ -d "${ROOT}/lib/live/boot" ]]; then
+    LIVE_BOOT=1
     echo "OK: live-boot erkannt."
 fi
 
-if [[ ${IS_CASPER} -eq 0 && ${IS_LIVE_BOOT} -eq 0 ]]; then
+if [[ -d "${ROOT}/scripts/casper" ]] ||
+   [[ -f "${ROOT}/scripts/casper-premount" ]] ||
+   [[ -f "${ROOT}/scripts/casper-bottom" ]] ||
+   [[ -d "${ROOT}/usr/share/initramfs-tools/scripts/casper" ]]; then
+    CASPER=1
+    echo "OK: casper erkannt."
+fi
+
+if [[ ${LIVE_BOOT} -eq 0 && ${CASPER} -eq 0 ]]; then
     die "Kein unterstütztes Live-System erkannt."
 fi
 
 ###############################################################################
-# Validate init
+# Create final timezone code
 ###############################################################################
 
-[[ -f "${ROOT}/init" ]] ||
-    die "Initrd does not contain /init."
+TIMEZONE_CODE="${WORK}/timezone-final.sh"
 
-###############################################################################
-# Install timezone hook
-###############################################################################
-
-info "Installiere Timezone-Hook ..."
-
-mkdir -p "${ROOT}/usr/lib/live/boot"
-
-cp "${PATCH_FILE}" \
-   "${ROOT}/usr/lib/live/boot/0023-timezone"
-
-chmod 0755 \
-    "${ROOT}/usr/lib/live/boot/0023-timezone"
-
-echo "    ${ROOT}/usr/lib/live/boot/0023-timezone"
-
-###############################################################################
-# Verify timezone hook
-###############################################################################
-
-info "Prüfe installierten Timezone-Hook ..."
-
-if [[ ! -x "${ROOT}/usr/lib/live/boot/0023-timezone" ]]; then
-    die "Timezone-Hook wurde nicht korrekt installiert."
-fi
-
-if ! grep -q '^timezone_setup()' \
-    "${ROOT}/usr/lib/live/boot/0023-timezone"; then
-    die "timezone_setup() wurde im Hook nicht gefunden."
-fi
-
-echo "OK."
-
-###############################################################################
-# Remove old timezone calls from live-boot main
-###############################################################################
-
-if [[ -f "${ROOT}/usr/lib/live/boot/9990-main.sh" ]]; then
-    info "Entferne alten timezone_setup-Aufruf aus 9990-main.sh ..."
-
-    sed -i \
-        '/^[[:space:]]*timezone_setup[[:space:]]*$/d' \
-        "${ROOT}/usr/lib/live/boot/9990-main.sh"
-
-    echo "OK."
-fi
-
-###############################################################################
-# Make timezone_setup available from /init
+cat > "${TIMEZONE_CODE}" <<'EOF'
+# Apply kernel-command-line timezone as the FINAL initramfs action.
 #
-# We explicitly source the hook from init.
+# This must run immediately before exec run-init.
 #
-# This avoids depending on live-boot's component loader and guarantees that
-# the function exists when we call it at the very end of initramfs execution.
+# The final live root is already mounted/constructed at this point.
+
+timezone_setup_final()
+{
+    tz=""
+
+    for arg in $(cat /proc/cmdline); do
+        case "$arg" in
+            timezone=*)
+                tz="${arg#timezone=}"
+                ;;
+        esac
+    done
+
+    # No timezone= parameter: nothing to do.
+    if [ -z "$tz" ]; then
+        return 0
+    fi
+
+    # Basic path traversal / malformed-value protection.
+    case "$tz" in
+        /*|*..*|*" "*)
+            echo "timezone-final: invalid timezone: $tz" >&2
+            return 0
+            ;;
+    esac
+
+    # rootmnt is the final live root.
+    if [ -z "${rootmnt:-}" ]; then
+        echo "timezone-final: rootmnt is not set" >&2
+        return 0
+    fi
+
+    # The timezone database belongs to the final root filesystem.
+    if [ ! -f "${rootmnt}/usr/share/zoneinfo/${tz}" ]; then
+        echo "timezone-final: unknown timezone: ${tz}" >&2
+        return 0
+    fi
+
+    echo "timezone-final: rootmnt=${rootmnt}"
+    echo "timezone-final: setting timezone to ${tz}"
+
+    echo "timezone-final: BEFORE:"
+    ls -l "${rootmnt}/etc/localtime" 2>&1 || true
+    cat "${rootmnt}/etc/timezone" 2>&1 || true
+
+    # Remove whatever the live system currently has.
+    rm -f "${rootmnt}/etc/localtime"
+
+    # Create the conventional absolute symlink used by Debian-family
+    # systems. Because rootmnt is the target root, the link itself must
+    # contain /usr/share/zoneinfo/... rather than rootmnt-prefixed paths.
+    ln -s \
+        "/usr/share/zoneinfo/${tz}" \
+        "${rootmnt}/etc/localtime"
+
+    # Debian/Mint/Kali commonly use /etc/timezone as well.
+    printf '%s\n' "${tz}" > "${rootmnt}/etc/timezone"
+
+    echo "timezone-final: AFTER:"
+    ls -l "${rootmnt}/etc/localtime" 2>&1 || true
+    cat "${rootmnt}/etc/timezone" 2>&1 || true
+}
+
+timezone_setup_final
+
+EOF
+
+###############################################################################
+# Patch init
 ###############################################################################
 
-info "Installiere Timezone-Hook in /init ..."
+info "Patch init ..."
 
-python3 - "${ROOT}/init" <<'PY'
-from pathlib import Path
+INIT_FILE="${ROOT}/init"
+
+[[ -f "${INIT_FILE}" ]] ||
+    die "Init file not found: ${INIT_FILE}"
+
+###############################################################################
+# Remove previous versions of our final timezone patch.
+#
+# This makes the script idempotent and avoids duplicate functions when the
+# same initrd is patched more than once.
+###############################################################################
+
+python3 - "${INIT_FILE}" "${TIMEZONE_CODE}" <<'PY'
 import sys
+from pathlib import Path
 
-path = Path(sys.argv[1])
-text = path.read_text()
+init_path = Path(sys.argv[1])
+timezone_path = Path(sys.argv[2])
 
-source_line = '. /usr/lib/live/boot/0023-timezone'
+text = init_path.read_text()
 
-# Remove previous copies of our source line.
-lines = text.splitlines()
-lines = [
-    line for line in lines
-    if line.strip() != source_line
-]
-text = "\n".join(lines) + "\n"
+begin_marker = "# BEGIN NETBOOTXYZ TIMEZONE FINAL PATCH"
+end_marker = "# END NETBOOTXYZ TIMEZONE FINAL PATCH"
 
-# Find a safe location after the initial shell setup.
-#
-# We insert immediately after the rootmnt export if present.
-marker = 'export rootmnt=/root'
+begin = text.find(begin_marker)
+if begin != -1:
+    end = text.find(end_marker, begin)
 
-if marker in text:
-    replacement = (
-        marker
-        + '\n\n'
-        + '# Load timezone hook.\n'
-        + source_line
-    )
-
-    if text.count(marker) != 1:
+    if end == -1:
         raise SystemExit(
-            "ERROR: expected exactly one 'export rootmnt=/root' marker."
+            "ERROR: Existing timezone patch has BEGIN marker but no END marker."
         )
 
-    text = text.replace(marker, replacement, 1)
+    end += len(end_marker)
 
-else:
-    # Fallback: insert after the shebang.
-    lines = text.splitlines()
-    insert_at = 1 if lines and lines[0].startswith("#!") else 0
+    # Remove trailing newline belonging to the old patch.
+    if end < len(text) and text[end] == "\n":
+        end += 1
 
-    lines[insert_at:insert_at] = [
-        "",
-        "# Load timezone hook.",
-        source_line,
-        ""
-    ]
+    text = text[:begin] + text[end:]
 
-    text = "\n".join(lines) + "\n"
+timezone_code = timezone_path.read_text().rstrip()
 
-path.write_text(text)
-PY
-
-###############################################################################
-# Patch final initramfs action
-###############################################################################
-
-info "Patch finalen initramfs-Schritt ..."
-
-python3 - "${ROOT}/init" <<'PY'
-from pathlib import Path
-import sys
-
-path = Path(sys.argv[1])
-text = path.read_text()
-
-marker = 'exec run-init ${drop_caps} "${rootmnt}" "${init}"'
-
-if marker not in text:
-    raise SystemExit(
-        "ERROR: final 'exec run-init' marker not found in init."
-    )
-
-if text.count(marker) != 1:
-    raise SystemExit(
-        "ERROR: expected exactly one final 'exec run-init' marker."
-    )
-
-# Remove any previous timezone_setup invocation.
-lines = text.splitlines()
-lines = [
-    line for line in lines
-    if line.strip() != "timezone_setup"
-]
-text = "\n".join(lines) + "\n"
-
-# Insert immediately before the final exec run-init.
-needle = marker
-
-replacement = (
-    "# Apply kernel-command-line timezone as the final initramfs action.\n"
-    "timezone_setup\n\n"
-    "# Chain to real filesystem\n"
-    + needle
+patch = (
+    begin_marker
+    + "\n"
+    + timezone_code
+    + "\n"
+    + end_marker
+    + "\n"
 )
 
-if text.count(needle) != 1:
+# We want the patch immediately before the final exec run-init.
+lines = text.splitlines(keepends=True)
+
+exec_index = None
+
+for i, line in enumerate(lines):
+    stripped = line.strip()
+
+    if (
+        stripped.startswith("exec run-init ")
+        and "${rootmnt}" in stripped
+        and "${init}" in stripped
+    ):
+        exec_index = i
+        break
+
+if exec_index is None:
     raise SystemExit(
-        "ERROR: final run-init marker disappeared or is no longer unique."
+        "ERROR: Could not find final 'exec run-init ...' in init."
     )
 
-text = text.replace(needle, replacement, 1)
+lines.insert(exec_index, "\n" + patch)
 
-path.write_text(text)
+init_path.write_text("".join(lines))
 PY
 
+echo "    timezone_setup_final eingefügt."
+
 ###############################################################################
-# Verify init
+# Verify init patch
 ###############################################################################
 
-info "Prüfe gepatchtes init ..."
+info "Prüfe finalen init-Patch ..."
 
-if ! grep -q '^timezone_setup$' "${ROOT}/init"; then
-    die "timezone_setup-Aufruf fehlt in /init."
-fi
+grep -n -A8 -B5 \
+    "BEGIN NETBOOTXYZ TIMEZONE FINAL PATCH" \
+    "${INIT_FILE}" || die "Timezone patch not found in init."
 
-TIMEZONE_CALLS="$(
-    grep -c '^timezone_setup$' "${ROOT}/init" || true
-)"
-
-if [[ "${TIMEZONE_CALLS}" -ne 1 ]]; then
-    die "Erwartet genau einen timezone_setup-Aufruf in /init, gefunden: ${TIMEZONE_CALLS}"
-fi
-
-if ! grep -q \
-    'exec run-init ${drop_caps} "${rootmnt}" "${init}"' \
-    "${ROOT}/init"; then
-    die "Finales exec run-init fehlt in /init."
-fi
-
-echo "OK."
+grep -n \
+    "timezone_setup_final" \
+    "${INIT_FILE}" || die "timezone_setup_final not found in init."
 
 ###############################################################################
 # Verify ordering
 ###############################################################################
 
-info "Prüfe Reihenfolge ..."
-
-python3 - "${ROOT}/init" <<'PY'
-from pathlib import Path
+python3 - "${INIT_FILE}" <<'PY'
 import sys
+from pathlib import Path
 
 text = Path(sys.argv[1]).read_text()
 
-timezone_pos = text.find("\ntimezone_setup\n")
-run_init_pos = text.find(
-    'exec run-init ${drop_caps} "${rootmnt}" "${init}"'
-)
+patch_pos = text.find("# BEGIN NETBOOTXYZ TIMEZONE FINAL PATCH")
+exec_pos = text.find("exec run-init ")
 
-if timezone_pos == -1:
+if patch_pos == -1:
+    raise SystemExit("ERROR: timezone patch marker missing.")
+
+if exec_pos == -1:
+    raise SystemExit("ERROR: final exec run-init missing.")
+
+if patch_pos > exec_pos:
     raise SystemExit(
-        "ERROR: timezone_setup not found."
+        "ERROR: timezone patch appears AFTER exec run-init."
     )
 
-if run_init_pos == -1:
-    raise SystemExit(
-        "ERROR: final exec run-init not found."
-    )
-
-if timezone_pos >= run_init_pos:
-    raise SystemExit(
-        "ERROR: timezone_setup does not occur before exec run-init."
-    )
-
-print("OK: timezone_setup steht unmittelbar vor dem finalen exec run-init.")
+print("OK: timezone patch appears before final exec run-init.")
 PY
 
 ###############################################################################
-# Show relevant result
+# Remove old live-boot timezone hooks if they belong to our previous patch.
+#
+# We deliberately do NOT touch distribution-provided files.
 ###############################################################################
 
-echo
-echo "==> Ergebnis /init:"
-echo
+info "Entferne alte eigene Timezone-Hooks ..."
 
-grep -n -A12 -B8 \
-    'timezone_setup' \
-    "${ROOT}/init" || true
+for old_hook in \
+    "${ROOT}/usr/lib/live/boot/023-timezone" \
+    "${ROOT}/usr/lib/live/boot/0023-timezone" \
+    "${ROOT}/lib/live/boot/023-timezone" \
+    "${ROOT}/lib/live/boot/0023-timezone"
+do
+    if [[ -f "${old_hook}" ]]; then
+        rm -f "${old_hook}"
+        echo "    entfernt: ${old_hook}"
+    fi
+done
 
-echo
-echo "==> Ergebnis Timezone-Hook:"
-echo
+###############################################################################
+# Remove previous timezone_setup call from 9990-main.sh if it exists.
+#
+# This is cleanup for earlier versions of the patcher. We only remove the
+# exact call, not distribution code.
+###############################################################################
 
-sed -n '1,140p' \
-    "${ROOT}/usr/lib/live/boot/0023-timezone"
+for main_file in \
+    "${ROOT}/usr/lib/live/boot/9990-main.sh" \
+    "${ROOT}/lib/live/boot/9990-main.sh"
+do
+    if [[ -f "${main_file}" ]]; then
+        sed -i \
+            '/^[[:space:]]*timezone_setup[[:space:]]*$/d' \
+            "${main_file}"
+    fi
+done
+
+###############################################################################
+# Check shell syntax of init
+###############################################################################
+
+info "Prüfe Shell-Syntax ..."
+
+bash -n "${INIT_FILE}" ||
+    die "Syntaxfehler in gepatchtem init."
 
 ###############################################################################
 # Repack initrd
@@ -487,90 +483,62 @@ sed -n '1,140p' \
 
 info "Packe Initrd ..."
 
-rm -f "${OUTPUT}"
+mkdir -p "$(dirname -- "${OUTPUT}")"
 
-case "${COMPRESSION}" in
+TMP_OUTPUT="${WORK}/initrd.output"
+
+(
+    cd "${ROOT}"
+
+    find . -print0 |
+        cpio --null -o -H newc
+) | case "${COMPRESSION}" in
     zstd)
-        (
-            cd "${ROOT}"
-            find . -print0 |
-                cpio --null -o -H newc
-        ) |
-            zstd -q -T0 -19 -c > "${OUTPUT}"
-        ;;
-    gzip)
-        (
-            cd "${ROOT}"
-            find . -print0 |
-                cpio --null -o -H newc
-        ) |
-            gzip -c > "${OUTPUT}"
+        zstd -q -T0 -c
         ;;
     xz)
-        (
-            cd "${ROOT}"
-            find . -print0 |
-                cpio --null -o -H newc
-        ) |
-            xz -c -T0 > "${OUTPUT}"
+        xz -c
         ;;
-    bzip2)
-        (
-            cd "${ROOT}"
-            find . -print0 |
-                cpio --null -o -H newc
-        ) |
-            bzip2 -c > "${OUTPUT}"
+    gzip)
+        gzip -c
         ;;
     lz4)
-        (
-            cd "${ROOT}"
-            find . -print0 |
-                cpio --null -o -H newc
-        ) |
-            lz4 -c > "${OUTPUT}"
+        lz4 -c
         ;;
     lzop)
-        (
-            cd "${ROOT}"
-            find . -print0 |
-                cpio --null -o -H newc
-        ) |
-            lzop -c > "${OUTPUT}"
+        lzop -c
         ;;
     none)
-        (
-            cd "${ROOT}"
-            find . -print0 |
-                cpio --null -o -H newc
-        ) > "${OUTPUT}"
+        cat
         ;;
-esac
+esac > "${TMP_OUTPUT}"
 
-###############################################################################
-# Permissions
-###############################################################################
+mv -f "${TMP_OUTPUT}" "${OUTPUT}"
 
 chmod 0644 "${OUTPUT}"
 
 ###############################################################################
-# Final verification
+# Verify output
 ###############################################################################
 
-info "Prüfe Ergebnis ..."
+info "Prüfe erzeugtes Initrd ..."
 
 [[ -s "${OUTPUT}" ]] ||
-    die "Output initrd wurde nicht erstellt oder ist leer."
+    die "Output initrd is empty."
 
-OUTPUT_INFO="$(file -b "${OUTPUT}")"
-
-echo "${OUTPUT}: ${OUTPUT_INFO}"
+file "${OUTPUT}"
 
 echo
 echo "============================================================"
 echo " Fertig"
 echo "============================================================"
 echo
-echo "Input : ${INPUT}"
 echo "Output: ${OUTPUT}"
+echo
+echo "Timezone wird beim Booten aus:"
+echo
+echo "    timezone=Europe/Berlin"
+echo
+echo "gelesen und unmittelbar vor run-init auf das finale Live-Root"
+echo "angewendet."
 echo
