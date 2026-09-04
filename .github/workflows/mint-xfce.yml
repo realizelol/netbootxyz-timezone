@@ -33,7 +33,7 @@ jobs:
     steps:
 
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
 
       - name: Install dependencies
@@ -219,7 +219,7 @@ jobs:
     steps:
 
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
 
       - name: Install dependencies
@@ -359,7 +359,7 @@ jobs:
 
       - name: Upload artifact
         if: steps.existing.outputs.already == 'false'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: initrd-timezone
           path: |
@@ -383,11 +383,11 @@ jobs:
     steps:
 
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
 
       - name: Download patched artifact
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v7
         with:
           name: initrd-timezone
           path: release-assets
