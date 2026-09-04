@@ -2,19 +2,20 @@
 
 set -e
 
-# ------------------------------------------------------------
+# ============================================================
 # Generic Live Initrd Timezone Patcher
 #
 # Supports:
-#   - Debian/Ubuntu/Mint casper
 #   - Debian/Kali live-boot
+#   - Ubuntu/Linux Mint casper/live initramfs
 #
 # Kernel command line:
 #   timezone=Europe/Berlin
 #
-# The timezone setup is injected directly into the init script
-# and executed immediately before the final run-init.
-# ------------------------------------------------------------
+# The timezone setup is injected into live-boot's/casper's
+# main live boot script, after the live root filesystem has
+# been mounted/constructed.
+# ============================================================
 
 if [[ ${EUID} -ne 0 ]]; then
     exec sudo "$0" "$@"
@@ -27,14 +28,13 @@ INPUT="${1:-initrd}"
 OUTPUT="${2:-initrd.timezone}"
 
 WORKDIR="$(mktemp -d -t timezone-patch-XXXXXXXX)"
+ROOT="${WORKDIR}/root"
 
 cleanup()
 {
     rm -rf "${WORKDIR}"
 }
 trap cleanup EXIT
-
-ROOT="${WORKDIR}/root"
 
 mkdir -p "${ROOT}"
 
@@ -61,6 +61,7 @@ require_command()
 
 require_command file
 require_command cpio
+require_command python3
 
 # ------------------------------------------------------------
 # Validate input
@@ -80,7 +81,6 @@ file "${INPUT}"
 # ------------------------------------------------------------
 
 FILE_INFO="$(file -b "${INPUT}")"
-
 COMPRESSION=""
 
 case "${FILE_INFO}" in
@@ -114,7 +114,7 @@ esac
 echo "Compression: ${COMPRESSION}"
 
 # ------------------------------------------------------------
-# Unpack initrd
+# Unpack
 # ------------------------------------------------------------
 
 echo "==> Entpacke Initrd ..."
@@ -156,61 +156,70 @@ esac
 # Detect live system
 # ------------------------------------------------------------
 
+echo
 echo "==> Erkenne Live-System ..."
 
-LIVE_SYSTEM=""
+LIVE_MAIN=""
 
-if [[ -d "${ROOT}/usr/lib/live/boot" ]]; then
+# Prefer usr/lib/live/boot because /lib may be a symlink.
+if [[ -f "${ROOT}/usr/lib/live/boot/9990-main.sh" ]]; then
+    LIVE_MAIN="${ROOT}/usr/lib/live/boot/9990-main.sh"
     LIVE_SYSTEM="live-boot"
-elif [[ -d "${ROOT}/lib/live/boot" ]]; then
+elif [[ -f "${ROOT}/lib/live/boot/9990-main.sh" ]]; then
+    LIVE_MAIN="${ROOT}/lib/live/boot/9990-main.sh"
     LIVE_SYSTEM="live-boot"
-elif [[ -d "${ROOT}/casper" ]] || \
-     [[ -d "${ROOT}/usr/share/initramfs-tools" ]] || \
-     [[ -f "${ROOT}/scripts/casper" ]]; then
+else
     LIVE_SYSTEM="casper"
+
+    # Casper versions can have different main script locations.
+    for candidate in \
+        "${ROOT}/usr/share/initramfs-tools/scripts/casper-bottom/9990-main" \
+        "${ROOT}/usr/share/initramfs-tools/scripts/casper-bottom/9990-main.sh" \
+        "${ROOT}/scripts/casper-bottom/9990-main" \
+        "${ROOT}/scripts/casper-bottom/9990-main.sh"
+    do
+        if [[ -f "${candidate}" ]]; then
+            LIVE_MAIN="${candidate}"
+            break
+        fi
+    done
 fi
 
-if [[ -z "${LIVE_SYSTEM}" ]]; then
+if [[ -n "${LIVE_MAIN}" ]]; then
+    echo "OK: ${LIVE_SYSTEM} erkannt."
+    echo "    Main script: ${LIVE_MAIN#${ROOT}}"
+else
     echo "ERROR: Kein unterstütztes Live-System erkannt." >&2
+    echo
+    echo "Vorhandene Live-Dateien:"
+    find "${ROOT}" \
+        -type f \
+        \( -name '9990-main*' -o -name '9990-*' -o -name '*casper*' \) \
+        -print \
+        2>/dev/null \
+        | head -100 || true
     exit 1
 fi
 
-echo "OK: ${LIVE_SYSTEM} erkannt."
-
 # ------------------------------------------------------------
-# Make sure init exists
+# Remove old timezone patches
 # ------------------------------------------------------------
 
-if [[ ! -f "${ROOT}/init" ]]; then
-    echo "ERROR: '${ROOT}/init' nicht gefunden." >&2
-    exit 1
-fi
-
-# ------------------------------------------------------------
-# Remove previous timezone patches
-# ------------------------------------------------------------
-
+echo
 echo "==> Entferne alte Timezone-Patches ..."
 
-# Remove our external hook if it exists.
 rm -f "${ROOT}/usr/lib/live/boot/0023-timezone"
 rm -f "${ROOT}/lib/live/boot/0023-timezone"
 
-# Remove possible previous injected timezone function/call.
-#
-# We use unique markers so that repeated GitHub Actions runs do
-# not accumulate multiple copies.
-
-python3 - "${ROOT}/init" <<'PY'
+python3 - "${LIVE_MAIN}" <<'PY'
 from pathlib import Path
 import re
 import sys
 
 path = Path(sys.argv[1])
-
 text = path.read_text()
 
-# Remove everything between our function markers.
+# Remove previous injected block.
 text = re.sub(
     r'\n?# BEGIN NETBOOTXYZ TIMEZONE SETUP\n.*?\n# END NETBOOTXYZ TIMEZONE SETUP\n',
     '\n',
@@ -218,7 +227,7 @@ text = re.sub(
     flags=re.DOTALL,
 )
 
-# Remove previous invocation.
+# Remove previous call.
 text = text.replace(
     '\n# NETBOOTXYZ TIMEZONE SETUP\nnetbootxyz_timezone_setup\n',
     '\n',
@@ -228,12 +237,13 @@ path.write_text(text)
 PY
 
 # ------------------------------------------------------------
-# Inject timezone function directly into init
+# Inject timezone function
 # ------------------------------------------------------------
 
-echo "==> Installiere Timezone-Funktion direkt in init ..."
+echo
+echo "==> Installiere Timezone-Funktion ..."
 
-python3 - "${ROOT}/init" <<'PY'
+python3 - "${LIVE_MAIN}" <<'PY'
 from pathlib import Path
 import sys
 
@@ -262,84 +272,102 @@ netbootxyz_timezone_setup()
         esac
     done
 
-    # No timezone= parameter: nothing to do.
+    # No timezone= parameter.
     if [ -z "$tz" ]; then
         return 0
     fi
 
-    # Basic path traversal / malformed-value protection.
+    # Basic path traversal / malformed value protection.
     case "$tz" in
         /*|*..*|*" "*)
-            echo "timezone: invalid timezone: $tz" >&2
+            echo "timezone: invalid timezone: ${tz}" >&2
             return 0
             ;;
     esac
 
-    # rootmnt is the real/live root filesystem.
+    # live-boot/casper normally exports rootmnt.
     if [ -z "${rootmnt}" ]; then
-        echo "timezone: rootmnt is not set" >&2
+        echo "timezone: ERROR: rootmnt is not set" >&2
         return 0
     fi
 
-    # The zoneinfo file must exist in the final root filesystem.
-    if [ ! -f "${rootmnt}/usr/share/zoneinfo/${tz}" ]; then
-        echo "timezone: unknown timezone: ${tz}" >&2
-        return 0
-    fi
+    log_begin_msg "Setting timezone to ${tz}"
 
     echo "timezone: rootmnt=${rootmnt}"
     echo "timezone: setting timezone to ${tz}"
 
     echo "timezone: BEFORE:"
+
     ls -l "${rootmnt}/etc/localtime" 2>&1 || true
-    cat "${rootmnt}/etc/timezone" 2>&1 || true
+
+    if [ -f "${rootmnt}/etc/timezone" ]; then
+        cat "${rootmnt}/etc/timezone" 2>&1 || true
+    else
+        echo "timezone: /etc/timezone does not exist"
+    fi
+
+    # The live root filesystem must contain tzdata.
+    if [ ! -f "${rootmnt}/usr/share/zoneinfo/${tz}" ]; then
+        echo "timezone: unknown timezone: ${tz}" >&2
+        log_end_msg
+        return 0
+    fi
+
+    echo "timezone: zoneinfo exists:"
+    ls -l "${rootmnt}/usr/share/zoneinfo/${tz}" 2>&1 || true
 
     # Make sure /etc exists.
     mkdir -p "${rootmnt}/etc"
 
-    # Remove whatever the distribution currently has there.
+    # Replace existing file/symlink.
     rm -f "${rootmnt}/etc/localtime"
 
-    # Use the conventional absolute target.
+    # Use the normal absolute timezone symlink.
     ln -s \
         "/usr/share/zoneinfo/${tz}" \
         "${rootmnt}/etc/localtime"
 
-    # Debian/Mint/Kali may use /etc/timezone as well.
+    # Debian/Kali/Mint use this file as well.
     printf '%s\n' "${tz}" > "${rootmnt}/etc/timezone"
 
     echo "timezone: AFTER:"
+
     ls -l "${rootmnt}/etc/localtime" 2>&1 || true
+    readlink "${rootmnt}/etc/localtime" 2>&1 || true
     cat "${rootmnt}/etc/timezone" 2>&1 || true
+
+    log_end_msg
 }
 
 # END NETBOOTXYZ TIMEZONE SETUP
 '''
 
-# Insert the function immediately before the first occurrence
-# of validate_init(). This keeps it available until the final
-# exec run-init.
-needle = "validate_init()"
+if marker_start in text:
+    raise SystemExit("ERROR: Timezone block bereits vorhanden.")
 
-if needle not in text:
-    raise SystemExit("ERROR: validate_init() nicht in init gefunden.")
+# Put the function near the beginning of the main script.
+# It must be defined before the invocation we add below.
+lines = text.splitlines(keepends=True)
 
-text = text.replace(
-    needle,
-    timezone_function + "\n" + needle,
-    1,
-)
+insert_at = 0
 
-path.write_text(text)
+# Keep the shebang first if present.
+if lines and lines[0].startswith("#!"):
+    insert_at = 1
+
+lines.insert(insert_at, timezone_function + "\n")
+
+path.write_text("".join(lines))
 PY
 
 # ------------------------------------------------------------
-# Insert the call immediately before final run-init
+# Find the correct final root-mount point
 # ------------------------------------------------------------
 
-echo "==> Platziere timezone_setup unmittelbar vor run-init ..."
+echo
+echo "==> Suche passenden Aufrufpunkt ..."
 
-python3 - "${ROOT}/init" <<'PY'
+python3 - "${LIVE_MAIN}" <<'PY'
 from pathlib import Path
 import sys
 
@@ -351,57 +379,84 @@ call = """
 netbootxyz_timezone_setup
 """
 
-# Find the final exec run-init line.
-lines = text.splitlines(keepends=True)
+if "mount_images_in_directory" in text:
+    needle = "\tmount_images_in_directory"
+    idx = text.find(needle)
 
-target_index = None
+    if idx != -1:
+        # Find end of containing line.
+        end = text.find("\n", idx)
 
-for i, line in enumerate(lines):
-    if line.startswith("exec run-init "):
-        target_index = i
+        if end != -1:
+            text = text[:end + 1] + call + text[end + 1:]
+            path.write_text(text)
+            print("    timezone_setup nach mount_images_in_directory eingefügt.")
+            sys.exit(0)
 
-if target_index is None:
-    raise SystemExit(
-        "ERROR: Finales 'exec run-init' nicht in init gefunden."
-    )
+# Fallback:
+# Find the last function-like block ending in log_end_msg.
+#
+# We deliberately place the call before the last log_end_msg,
+# but only if no more specific live-root mount point was found.
 
-lines.insert(target_index, call)
+needle = "\tlog_end_msg"
 
-path.write_text("".join(lines))
+positions = []
+start = 0
+
+while True:
+    pos = text.find(needle, start)
+
+    if pos == -1:
+        break
+
+    positions.append(pos)
+    start = pos + 1
+
+if positions:
+    pos = positions[-1]
+    text = text[:pos] + call + "\n" + text[pos:]
+    path.write_text(text)
+    print("    timezone_setup vor dem letzten log_end_msg eingefügt.")
+    sys.exit(0)
+
+raise SystemExit(
+    "ERROR: Konnte keinen geeigneten Aufrufpunkt in 9990-main.sh finden."
+)
 PY
 
 # ------------------------------------------------------------
-# Verify init patch
+# Verify function and call
 # ------------------------------------------------------------
 
-echo "==> Prüfe gepatchtes init ..."
+echo
+echo "==> Prüfe installierten Timezone-Code ..."
 
-if ! grep -q "BEGIN NETBOOTXYZ TIMEZONE SETUP" "${ROOT}/init"; then
-    echo "ERROR: Timezone-Funktion wurde nicht in init eingefügt." >&2
+if ! grep -q "BEGIN NETBOOTXYZ TIMEZONE SETUP" "${LIVE_MAIN}"; then
+    echo "ERROR: Timezone-Funktion fehlt." >&2
     exit 1
 fi
 
-if ! grep -q "netbootxyz_timezone_setup" "${ROOT}/init"; then
-    echo "ERROR: Timezone-Aufruf wurde nicht in init eingefügt." >&2
+if ! grep -q "netbootxyz_timezone_setup" "${LIVE_MAIN}"; then
+    echo "ERROR: Timezone-Aufruf fehlt." >&2
     exit 1
 fi
 
-echo "OK: Timezone-Funktion in init vorhanden."
+echo "OK."
+
+# ------------------------------------------------------------
+# Show relevant section
+# ------------------------------------------------------------
 
 echo
-echo "==> Relevanter Bereich von init:"
+echo "==> Ergebnis ${LIVE_MAIN#${ROOT}}:"
 
-grep -n -A12 -B5 \
+grep -n -A15 -B8 \
     "netbootxyz_timezone_setup" \
-    "${ROOT}/init" || true
-
-echo
-echo "==> Letzte Zeilen von init:"
-
-tail -n 30 "${ROOT}/init"
+    "${LIVE_MAIN}" || true
 
 # ------------------------------------------------------------
-# Repack initrd
+# Repack
 # ------------------------------------------------------------
 
 echo
@@ -413,45 +468,36 @@ case "${COMPRESSION}" in
     zstd)
         (
             cd "${ROOT}"
-            find . -print0 \
-                | cpio --null -o -H newc
+            find . -print0 | cpio --null -o -H newc
         ) | zstd -T0 -q -c > "${TEMP_OUTPUT}"
         ;;
     gzip)
         (
             cd "${ROOT}"
-            find . -print0 \
-                | cpio --null -o -H newc
+            find . -print0 | cpio --null -o -H newc
         ) | gzip -c > "${TEMP_OUTPUT}"
         ;;
     xz)
         (
             cd "${ROOT}"
-            find . -print0 \
-                | cpio --null -o -H newc
+            find . -print0 | cpio --null -o -H newc
         ) | xz -c > "${TEMP_OUTPUT}"
         ;;
     lz4)
         (
             cd "${ROOT}"
-            find . -print0 \
-                | cpio --null -o -H newc
+            find . -print0 | cpio --null -o -H newc
         ) | lz4 -z -c > "${TEMP_OUTPUT}"
         ;;
     lzo)
         (
             cd "${ROOT}"
-            find . -print0 \
-                | cpio --null -o -H newc
+            find . -print0 | cpio --null -o -H newc
         ) | lzop -c > "${TEMP_OUTPUT}"
         ;;
 esac
 
 mv -f "${TEMP_OUTPUT}" "${OUTPUT}"
-
-# ------------------------------------------------------------
-# Permissions
-# ------------------------------------------------------------
 
 chmod 0644 "${OUTPUT}"
 
@@ -474,14 +520,7 @@ echo "============================================================"
 echo " OK"
 echo "============================================================"
 echo
-echo "Timezone wird beim Booten aus"
-echo
-echo "    timezone=Europe/Berlin"
-echo
-echo "gelesen und unmittelbar vor dem finalen run-init auf"
-echo
-echo "    ${ROOT}/etc/localtime"
-echo
-echo "angewendet."
+echo "Timezone wird über timezone= aus /proc/cmdline gelesen."
+echo "Der Hook wird innerhalb des Live-Main-Skripts ausgeführt."
 echo
 echo "Output: ${OUTPUT}"
