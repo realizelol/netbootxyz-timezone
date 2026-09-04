@@ -1,325 +1,264 @@
 #!/usr/bin/env bash
 
-set -Eeuo pipefail
+set -euo pipefail
 
+INPUT="${1:?Input initrd fehlt}"
+OUTPUT="${2:?Output initrd fehlt}"
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+WORKDIR="$(mktemp -d)"
+ROOT="${WORKDIR}/root"
 
-PATCH_FILE="$REPO_ROOT/patches/23timezone"
-
-
-usage()
-{
-    echo "Usage:"
-    echo
-    echo "  $0 INPUT_INITRD OUTPUT_INITRD"
-    echo
-    exit 1
-}
-
-
-die()
-{
-    echo
-    echo "ERROR: $*" >&2
-    exit 1
-}
-
-
-[[ $# -eq 2 ]] || usage
-
-
-INPUT="$(realpath "$1")"
-OUTPUT="$(realpath "$2")"
-
-
-[[ -f "$INPUT" ]] \
-    || die "Input initrd not found: $INPUT"
-
-[[ -f "$PATCH_FILE" ]] \
-    || die "Timezone hook not found: $PATCH_FILE"
-
-
-for cmd in zstd cpio file lsinitramfs sha256sum; do
-    command -v "$cmd" >/dev/null 2>&1 \
-        || die "Required command not found: $cmd"
-done
-
-
-WORK="$(mktemp -d -t mint-timezone-patch-XXXXXXXX)"
-
-cleanup()
-{
-    rm -rf "$WORK"
+cleanup() {
+    rm -rf "${WORKDIR}"
 }
 
 trap cleanup EXIT
 
-
-ROOT="$WORK/root"
-VERIFY="$WORK/verify"
-
-mkdir -p "$ROOT" "$VERIFY"
-
-
 echo "============================================================"
-echo " Casper Initrd Timezone Patcher"
+echo " Generic Live Initrd Timezone Patcher"
 echo "============================================================"
 echo
-echo "Input : $INPUT"
-echo "Output: $OUTPUT"
+echo "Input  : ${INPUT}"
+echo "Output : ${OUTPUT}"
 echo
 
+echo "==> Prüfe Original-Initrd ..."
 
-# ============================================================
-# Check input
-# ============================================================
+test -s "${INPUT}"
+file "${INPUT}"
 
-echo "==> Prüfe Input ..."
-
-file "$INPUT"
+mkdir -p "${ROOT}"
 
 echo
-
-
-# ============================================================
-# Extract
-# ============================================================
-
 echo "==> Entpacke Initrd ..."
 
-cd "$ROOT"
-
-zstd -dc "$INPUT" | cpio -idm --quiet
-
-
-# ============================================================
-# Verify Casper
-# ============================================================
-
-echo "==> Prüfe Casper ..."
-
-[[ -d "$ROOT/scripts/casper-bottom" ]] \
-    || die "scripts/casper-bottom fehlt."
-
-[[ -f "$ROOT/scripts/casper-bottom/ORDER" ]] \
-    || die "scripts/casper-bottom/ORDER fehlt."
-
-
-# ============================================================
-# Install timezone hook
-# ============================================================
-
-echo "==> Installiere Timezone-Hook ..."
-
-install -m 0755 \
-    "$PATCH_FILE" \
-    "$ROOT/scripts/casper-bottom/23timezone"
-
-
-# ============================================================
-# Modify ORDER
-# ============================================================
-
-echo "==> Aktualisiere casper-bottom/ORDER ..."
-
-ORDER="$ROOT/scripts/casper-bottom/ORDER"
-
-# Vorhandenen Eintrag entfernen, falls vorhanden.
-sed -i \
-    '\#/scripts/casper-bottom/23timezone#d' \
-    "$ORDER"
-
-
-TMP_ORDER="$WORK/ORDER.new"
-
-awk '
-{
-    if ($0 ~ /\/scripts\/casper-bottom\/25configure_init/) {
-        print "/scripts/casper-bottom/23timezone \"$@\""
-    }
-
-    print
-}
-' "$ORDER" > "$TMP_ORDER"
-
-mv "$TMP_ORDER" "$ORDER"
-
-
-# ============================================================
-# Verify ORDER before packing
-# ============================================================
+unzstd -c "${INPUT}" | (
+    cd "${ROOT}"
+    cpio -id --quiet
+)
 
 echo
-echo "==> Prüfe ORDER ..."
-echo
+echo "==> Erkenne Live-System ..."
 
-grep -n -E \
-    '/scripts/casper-bottom/(23timezone|25configure_init)' \
-    "$ORDER" \
-    || true
+if [[ -d "${ROOT}/scripts/casper-bottom" ]]; then
 
+    TYPE="casper"
 
-TZ_LINE="$(
-    grep -n \
-        '/scripts/casper-bottom/23timezone' \
-        "$ORDER" \
-        | head -n1 \
-        | cut -d: -f1 \
-        || true
-)"
+    echo "OK: casper erkannt."
 
-CONFIG_LINE="$(
-    grep -n \
-        '/scripts/casper-bottom/25configure_init' \
-        "$ORDER" \
-        | head -n1 \
-        | cut -d: -f1 \
-        || true
-)"
+elif [[ -d "${ROOT}/scripts/live" ||
+        -d "${ROOT}/usr/lib/live/boot" ]]; then
 
+    TYPE="live-boot"
 
-[[ -n "$TZ_LINE" ]] \
-    || die "23timezone fehlt in ORDER."
+    echo "OK: live-boot erkannt."
 
-[[ -n "$CONFIG_LINE" ]] \
-    || die "25configure_init fehlt in ORDER."
+else
 
+    echo
+    echo "FEHLER: Kein unterstütztes Live-System erkannt."
+    echo
+    echo "Erwartet wurde entweder:"
+    echo "  scripts/casper-bottom"
+    echo "oder:"
+    echo "  scripts/live"
+    echo "  usr/lib/live/boot"
+    exit 1
 
-if (( TZ_LINE >= CONFIG_LINE )); then
-    die "23timezone steht nicht vor 25configure_init."
 fi
 
-
 echo
-echo "OK: 23timezone steht vor 25configure_init."
+echo "==> Erzeuge Timezone-Hook ..."
 
+case "${TYPE}" in
 
-# ============================================================
-# Repack
-# ============================================================
+    casper)
+
+        HOOK="${ROOT}/scripts/casper-bottom/23timezone"
+
+        cat > "${HOOK}" <<'EOF'
+#!/bin/sh
+
+PREREQ=""
+
+prereqs()
+{
+    echo "$PREREQ"
+}
+
+case "$1" in
+    prereqs)
+        prereqs
+        exit 0
+        ;;
+esac
+
+TZ=""
+
+for param in $(cat /proc/cmdline); do
+    case "$param" in
+        timezone=*)
+            TZ="${param#timezone=}"
+            ;;
+    esac
+done
+
+# Keine timezone auf der Kernel-Commandline:
+# nichts verändern.
+[ -z "$TZ" ] && exit 0
+
+# Prüfen, ob die angegebene Zeitzone existiert.
+if [ ! -e "/root/usr/share/zoneinfo/$TZ" ]; then
+    echo "WARNING: Timezone '$TZ' not found."
+    exit 0
+fi
+
+echo "Setting timezone to $TZ"
+
+mkdir -p /root/etc
+
+echo "$TZ" > /root/etc/timezone
+
+rm -f /root/etc/localtime
+ln -s "/usr/share/zoneinfo/$TZ" /root/etc/localtime
+
+exit 0
+EOF
+
+        chmod 0755 "${HOOK}"
+
+        ORDER="${ROOT}/scripts/casper-bottom/ORDER"
+
+        echo
+        echo "==> Aktualisiere casper-bottom/ORDER ..."
+
+        if ! grep -q \
+            '/scripts/casper-bottom/23timezone' \
+            "${ORDER}"
+        then
+
+            awk '
+                /25configure_init/ {
+                    print "/scripts/casper-bottom/23timezone \"$@\""
+                }
+                {
+                    print
+                }
+            ' "${ORDER}" > "${ORDER}.new"
+
+            mv "${ORDER}.new" "${ORDER}"
+
+        fi
+
+        echo
+        echo "==> Relevanter Abschnitt von ORDER:"
+
+        grep -n -A1 -B1 \
+            '/scripts/casper-bottom/23timezone\|/scripts/casper-bottom/25configure_init' \
+            "${ORDER}" || true
+
+        ;;
+
+    live-boot)
+
+        HOOK="${ROOT}/scripts/live/23timezone"
+
+        cat > "${HOOK}" <<'EOF'
+#!/bin/sh
+
+PREREQ=""
+
+prereqs()
+{
+    echo "$PREREQ"
+}
+
+case "$1" in
+    prereqs)
+        prereqs
+        exit 0
+        ;;
+esac
+
+TZ=""
+
+for param in $(cat /proc/cmdline); do
+    case "$param" in
+        timezone=*)
+            TZ="${param#timezone=}"
+            ;;
+    esac
+done
+
+# Keine timezone auf der Kernel-Commandline:
+# nichts verändern.
+[ -z "$TZ" ] && exit 0
+
+# Prüfen, ob die angegebene Zeitzone existiert.
+if [ ! -e "/root/usr/share/zoneinfo/$TZ" ]; then
+    echo "WARNING: Timezone '$TZ' not found."
+    exit 0
+fi
+
+echo "Setting timezone to $TZ"
+
+mkdir -p /root/etc
+
+echo "$TZ" > /root/etc/timezone
+
+rm -f /root/etc/localtime
+ln -s "/usr/share/zoneinfo/$TZ" /root/etc/localtime
+
+exit 0
+EOF
+
+        chmod 0755 "${HOOK}"
+
+        echo
+        echo "OK: live-boot Timezone-Hook:"
+        echo "    scripts/live/23timezone"
+
+        ;;
+
+esac
 
 echo
 echo "==> Erzeuge neue Zstandard-Initrd ..."
-echo
 
-rm -f "$OUTPUT"
+(
+    cd "${ROOT}"
 
-cd "$ROOT"
-
-find . -print0 \
-    | cpio --null -o -H newc --quiet \
-    | zstd -T0 -19 -o "$OUTPUT"
-
-
-[[ -s "$OUTPUT" ]] \
-    || die "Output wurde nicht erzeugt."
-
-
-# ============================================================
-# Verify resulting initrd
-# ============================================================
+    find . -print0 |
+        cpio --null -o -H newc --quiet |
+        zstd -T0 -19 -o "${OUTPUT}"
+)
 
 echo
 echo "==> Prüfe erzeugte Initrd ..."
-echo
 
-file "$OUTPUT"
+test -s "${OUTPUT}"
 
-ls -lh "$OUTPUT"
-
+file "${OUTPUT}"
+ls -lh "${OUTPUT}"
 
 echo
 echo "==> Prüfe Timezone-Hook ..."
 
-LISTING="$WORK/listing"
+case "${TYPE}" in
 
-lsinitramfs "$OUTPUT" > "$LISTING"
+    casper)
+        test -f "${ROOT}/scripts/casper-bottom/23timezone"
+        echo "OK: Casper Timezone-Hook ist vorhanden."
+        ;;
 
+    live-boot)
+        test -f "${ROOT}/scripts/live/23timezone"
+        echo "OK: live-boot Timezone-Hook ist vorhanden."
+        ;;
 
-grep -Fq \
-    'scripts/casper-bottom/23timezone' \
-    "$LISTING" \
-    || die "Timezone-Hook fehlt in der neuen Initrd."
-
-
-echo "OK: Timezone-Hook vorhanden."
-
-
-# ============================================================
-# Extract and verify ORDER from NEW initrd
-# ============================================================
-
-echo
-echo "==> Prüfe ORDER der neuen Initrd ..."
-
-mkdir -p "$VERIFY"
-
-cd "$VERIFY"
-
-zstd -dc "$OUTPUT" | cpio -idm --quiet
-
-NEW_ORDER="$VERIFY/scripts/casper-bottom/ORDER"
-
-[[ -f "$NEW_ORDER" ]] \
-    || die "ORDER fehlt in der neuen Initrd."
-
-
-echo
-grep -n -E \
-    '/scripts/casper-bottom/(23timezone|25configure_init)' \
-    "$NEW_ORDER" \
-    || true
-
-
-TZ_LINE="$(
-    grep -n \
-        '/scripts/casper-bottom/23timezone' \
-        "$NEW_ORDER" \
-        | head -n1 \
-        | cut -d: -f1 \
-        || true
-)"
-
-CONFIG_LINE="$(
-    grep -n \
-        '/scripts/casper-bottom/25configure_init' \
-        "$NEW_ORDER" \
-        | head -n1 \
-        | cut -d: -f1 \
-        || true
-)"
-
-
-[[ -n "$TZ_LINE" ]] \
-    || die "23timezone fehlt in ORDER der neuen Initrd."
-
-[[ -n "$CONFIG_LINE" ]] \
-    || die "25configure_init fehlt in ORDER der neuen Initrd."
-
-
-if (( TZ_LINE >= CONFIG_LINE )); then
-    die "23timezone steht in der neuen Initrd nicht vor 25configure_init."
-fi
-
-
-echo
-echo "OK: ORDER der neuen Initrd ist korrekt."
-
-
-# ============================================================
-# SHA256
-# ============================================================
-
-echo
-echo "==> SHA256 ..."
-
-sha256sum "$OUTPUT"
-
+esac
 
 echo
 echo "============================================================"
-echo " Patch erfolgreich"
+echo " Fertig"
 echo "============================================================"
-echo
