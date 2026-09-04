@@ -12,8 +12,12 @@ timezone_setup()
         esac
     done
 
+    # Keine timezone= Angabe -> nichts tun
     [ -n "$tz" ] || return 0
 
+    echo "timezone: setting timezone to $tz"
+
+    # Basic validation
     case "$tz" in
         /*|*..*|*" "*)
             echo "timezone: invalid timezone: $tz" >&2
@@ -21,12 +25,11 @@ timezone_setup()
             ;;
     esac
 
+    # Zoneinfo muss im bereits gemounteten Live-Root liegen
     if [ ! -f "/root/usr/share/zoneinfo/$tz" ]; then
         echo "timezone: unknown timezone: $tz" >&2
         return 0
     fi
-
-    echo "timezone: setting timezone to $tz"
 
     rm -f /root/etc/localtime
 
