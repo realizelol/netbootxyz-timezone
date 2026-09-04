@@ -26,7 +26,12 @@ if [ ! -f "/usr/share/zoneinfo/${tz}" ]; then
     exit 0
 fi
 
-echo "timezone: live-config setting timezone to ${tz}"
+echo "timezone: live-config final timezone setup"
+echo "timezone: setting timezone to ${tz}"
+
+echo "timezone: BEFORE:"
+ls -l /etc/localtime 2>&1 || true
+cat /etc/timezone 2>&1 || true
 
 rm -f /etc/localtime
 
@@ -36,8 +41,6 @@ ln -s \
 
 printf '%s\n' "${tz}" > /etc/timezone
 
-echo "timezone: live-config final localtime:"
+echo "timezone: AFTER:"
 ls -l /etc/localtime 2>&1 || true
-
-echo "timezone: live-config final timezone:"
 cat /etc/timezone 2>&1 || true
