@@ -15,6 +15,10 @@ env:
 
 jobs:
 
+  # ==========================================================
+  # DISCOVER
+  # ==========================================================
+
   discover:
     name: Find latest Linux Mint XFCE
     runs-on: ubuntu-latest
@@ -65,6 +69,7 @@ jobs:
           matches = []
 
           for name, entry in endpoints.items():
+
               if not isinstance(entry, dict):
                   continue
 
@@ -92,14 +97,22 @@ jobs:
                   "path": path,
               })
 
+
           if not matches:
               raise SystemExit(
                   "ERROR: Kein Linux-Mint-XFCE-Endpoint gefunden."
               )
 
+
           def version_key(item):
-              numbers = re.findall(r"\d+", item["version"])
-              return [int(x) for x in numbers]
+              return [
+                  int(x)
+                  for x in re.findall(
+                      r"\d+",
+                      item["version"]
+                  )
+              ]
+
 
           matches.sort(
               key=version_key,
@@ -108,7 +121,10 @@ jobs:
 
           selected = matches[0]
 
+
+          print()
           print("Gefundene Mint-XFCE-Endpoints:")
+          print()
 
           for item in matches:
               print(
@@ -120,9 +136,18 @@ jobs:
                   + item["path"]
               )
 
+
           print()
           print("Ausgewählt:")
-          print(selected)
+          print(
+              "  "
+              + selected["name"]
+              + " | Version "
+              + selected["version"]
+              + " | "
+              + selected["path"]
+          )
+
 
           path = selected["path"].strip("/")
 
@@ -134,10 +159,12 @@ jobs:
                   + selected["path"]
               )
 
+
           source_release = path.split(
               marker,
               1
           )[1].strip("/")
+
 
           source_url = (
               "https://github.com/"
@@ -146,18 +173,20 @@ jobs:
               + "/initrd"
           )
 
-          build_id = source_release.split("/")[-1]
 
-          release_tag = (
-              "mint-xfce-"
-              + selected["version"]
-              + "-"
-              + build_id
-          )
+          # source_release ist z.B.
+          #
+          # 22-8770cb66
+          #
+          # Deshalb NICHT noch einmal die Version davor setzen.
+
+          release_tag = "mint-xfce-" + source_release
+
 
           output = os.environ["GITHUB_OUTPUT"]
 
           with open(output, "a", encoding="utf-8") as f:
+
               f.write(
                   "endpoint="
                   + selected["name"]
@@ -187,6 +216,7 @@ jobs:
                   + release_tag
                   + "\n"
               )
+
           PY
 
 
@@ -210,4 +240,175 @@ jobs:
               >/dev/null 2>&1
           then
               echo "exists=true" >> "$GITHUB_OUTPUT"
-              echo "Release exists
+              echo "Release exists: $RELEASE_TAG"
+          else
+              echo "exists=false" >> "$GITHUB_OUTPUT"
+              echo "Release does not exist: $RELEASE_TAG"
+          fi
+
+
+  # ==========================================================
+  # PATCH
+  # ==========================================================
+
+  patch:
+    name: Patch initrd
+    needs: discover
+
+    if: needs.discover.outputs.release_exists == 'false'
+
+    runs-on: ubuntu-latest
+
+    steps:
+
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+
+          sudo apt-get install -y \
+            cpio \
+            zstd \
+            file
+
+
+      - name: Download original initrd
+        env:
+          SOURCE_URL: ${{ needs.discover.outputs.source_url }}
+        run: |
+          echo "Downloading:"
+          echo "$SOURCE_URL"
+
+          curl \
+            --fail \
+            --location \
+            --retry 5 \
+            --retry-delay 2 \
+            --output initrd \
+            "$SOURCE_URL"
+
+          echo
+          echo "Downloaded initrd:"
+          ls -lh initrd
+
+          echo
+          file initrd
+
+
+      - name: Make patcher executable
+        run: |
+          chmod +x scripts/patch-initrd.sh
+
+
+      - name: Patch initrd
+        run: |
+          ./scripts/patch-initrd.sh \
+            initrd \
+            initrd.timezone
+
+
+      - name: Create metadata
+        env:
+          ENDPOINT: ${{ needs.discover.outputs.endpoint }}
+          VERSION: ${{ needs.discover.outputs.version }}
+          SOURCE_PATH: ${{ needs.discover.outputs.path }}
+          SOURCE_URL: ${{ needs.discover.outputs.source_url }}
+          RELEASE_TAG: ${{ needs.discover.outputs.release_tag }}
+        run: |
+          sha256sum initrd.timezone > SHA256SUMS
+
+          cat > SOURCE.txt <<EOF
+Linux Mint XFCE timezone-patched initrd
+
+Distribution: Linux Mint
+Flavor: XFCE
+Architecture: amd64
+
+netboot.xyz endpoint:
+${ENDPOINT}
+
+Mint version:
+${VERSION}
+
+ubuntu-squash path:
+${SOURCE_PATH}
+
+Original initrd:
+${SOURCE_URL}
+
+Patched release:
+${RELEASE_TAG}
+
+Patch:
+patches/23timezone
+
+Kernel parameter:
+mint_tz=Europe/Berlin
+EOF
+
+          echo
+          echo "SOURCE.txt:"
+          cat SOURCE.txt
+
+          echo
+          echo "SHA256SUMS:"
+          cat SHA256SUMS
+
+
+      - name: Upload patched artifact
+        uses: actions/upload-artifact@v6
+        with:
+          name: initrd-timezone
+          if-no-files-found: error
+          compression-level: 0
+          path: |
+            initrd.timezone
+            SHA256SUMS
+            SOURCE.txt
+
+
+  # ==========================================================
+  # RELEASE
+  # ==========================================================
+
+  release:
+    name: Create GitHub Release
+    needs:
+      - discover
+      - patch
+
+    if: needs.discover.outputs.release_exists == 'false'
+
+    runs-on: ubuntu-latest
+
+    steps:
+
+      - name: Download patched artifact
+        uses: actions/download-artifact@v7
+        with:
+          name: initrd-timezone
+          path: release-assets
+
+
+      - name: Show release assets
+        run: |
+          echo "Release assets:"
+          find release-assets -type f -exec ls -lh {} \;
+
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ needs.discover.outputs.release_tag }}
+          VERSION: ${{ needs.discover.outputs.version }}
+        run: |
+          gh release create "$RELEASE_TAG" \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "Linux Mint XFCE ${VERSION} - timezone patched" \
+            --generate-notes \
+            release-assets/initrd.timezone \
+            release-assets/SHA256SUMS \
+            release-assets/SOURCE.txt
