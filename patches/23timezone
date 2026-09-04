@@ -16,15 +16,15 @@ esac
 
 
 # ============================================================
-# Read mint_tz from kernel command line
+# Read timezone from kernel command line
 # ============================================================
 
 tz=""
 
 for arg in $(cat /proc/cmdline); do
     case "$arg" in
-        mint_tz=*)
-            tz="${arg#mint_tz=}"
+        timezone=*)
+            tz="${arg#timezone=}"
             ;;
     esac
 done
@@ -42,7 +42,7 @@ fi
 
 case "$tz" in
     /*|*..*|*" "*)
-        echo "mint-timezone: ungültiger Wert: $tz" >&2
+        echo "timezone: ungültiger Wert: $tz" >&2
         exit 0
         ;;
 esac
@@ -53,7 +53,7 @@ esac
 # ============================================================
 
 if [ ! -f "/root/usr/share/zoneinfo/$tz" ]; then
-    echo "mint-timezone: unbekannte Zeitzone: $tz" >&2
+    echo "timezone: unbekannte Zeitzone: $tz" >&2
     exit 0
 fi
 
@@ -62,7 +62,7 @@ fi
 # Set timezone in Live filesystem
 # ============================================================
 
-echo "mint-timezone: setze Zeitzone auf $tz"
+echo "timezone: setze Zeitzone auf $tz"
 
 rm -f /root/etc/localtime
 
