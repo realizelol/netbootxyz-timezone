@@ -2,8 +2,17 @@
 
 timezone_setup()
 {
-    tz=""
+    local tz=""
+    local arg
 
+    # rootmnt is normally /root in initramfs-tools/live-boot.
+    # Use the variable instead of assuming a fixed mount point.
+    if [ -z "${rootmnt}" ]; then
+        echo "timezone: rootmnt is not set" >&2
+        return 0
+    fi
+
+    # Read timezone= from the kernel command line.
     for arg in $(cat /proc/cmdline); do
         case "$arg" in
             timezone=*)
@@ -12,10 +21,12 @@ timezone_setup()
         esac
     done
 
+    # No timezone= parameter: nothing to do.
     if [ -z "$tz" ]; then
         return 0
     fi
 
+    # Basic path validation.
     case "$tz" in
         /*|*..*|*" "*)
             echo "timezone: invalid timezone: $tz" >&2
@@ -23,25 +34,34 @@ timezone_setup()
             ;;
     esac
 
-    if [ ! -f "/root/usr/share/zoneinfo/$tz" ]; then
-        echo "timezone: unknown timezone: $tz" >&2
+    echo "timezone: rootmnt=${rootmnt}"
+    echo "timezone: setting timezone to ${tz}"
+
+    # The live root has already been mounted at this point.
+    # Therefore zoneinfo must be checked inside rootmnt.
+    if [ ! -f "${rootmnt}/usr/share/zoneinfo/${tz}" ]; then
+        echo "timezone: unknown timezone: ${tz}" >&2
         return 0
     fi
 
-    echo "timezone: rootmnt=${rootmnt}"
-    echo "timezone: setting timezone to $tz"
+    # Make sure /etc exists in the live root.
+    mkdir -p "${rootmnt}/etc"
 
     echo "timezone: BEFORE:"
     ls -l "${rootmnt}/etc/localtime" 2>&1 || true
     cat "${rootmnt}/etc/timezone" 2>&1 || true
 
+    # Replace the existing /etc/localtime symlink/file.
     rm -f "${rootmnt}/etc/localtime"
 
+    # The target is intentionally /usr/share/zoneinfo/...,
+    # because /root becomes / after switch_root.
     ln -s \
-        "/usr/share/zoneinfo/$tz" \
+        "/usr/share/zoneinfo/${tz}" \
         "${rootmnt}/etc/localtime"
 
-    printf '%s\n' "$tz" > "${rootmnt}/etc/timezone"
+    # Keep /etc/timezone in sync where the distribution uses it.
+    printf '%s\n' "${tz}" > "${rootmnt}/etc/timezone"
 
     echo "timezone: AFTER:"
     ls -l "${rootmnt}/etc/localtime" 2>&1 || true
