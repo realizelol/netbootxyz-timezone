@@ -1,0 +1,75 @@
+#!/bin/sh
+
+PREREQ=""
+
+prereqs()
+{
+    echo "$PREREQ"
+}
+
+case "$1" in
+    prereqs)
+        prereqs
+        exit 0
+        ;;
+esac
+
+
+# ============================================================
+# Read mint_tz from kernel command line
+# ============================================================
+
+tz=""
+
+for arg in $(cat /proc/cmdline); do
+    case "$arg" in
+        mint_tz=*)
+            tz="${arg#mint_tz=}"
+            ;;
+    esac
+done
+
+
+# Kein Parameter -> normales Casper-Verhalten
+if [ -z "$tz" ]; then
+    exit 0
+fi
+
+
+# ============================================================
+# Basic validation
+# ============================================================
+
+case "$tz" in
+    /*|*..*|*" "*)
+        echo "mint-timezone: ungültiger Wert: $tz" >&2
+        exit 0
+        ;;
+esac
+
+
+# ============================================================
+# Check timezone
+# ============================================================
+
+if [ ! -f "/root/usr/share/zoneinfo/$tz" ]; then
+    echo "mint-timezone: unbekannte Zeitzone: $tz" >&2
+    exit 0
+fi
+
+
+# ============================================================
+# Set timezone in Live filesystem
+# ============================================================
+
+echo "mint-timezone: setze Zeitzone auf $tz"
+
+rm -f /root/etc/localtime
+
+ln -s \
+    "/usr/share/zoneinfo/$tz" \
+    /root/etc/localtime
+
+printf '%s\n' "$tz" > /root/etc/timezone
+
+exit 0
