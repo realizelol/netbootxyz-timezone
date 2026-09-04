@@ -205,24 +205,105 @@ info "Erkenne Live-System ..."
 LIVE_BOOT=0
 CASPER=0
 
+###############################################################################
+# live-boot detection
+###############################################################################
+
 if [[ -f "${ROOT}/usr/bin/live-boot" ]] ||
    [[ -d "${ROOT}/usr/lib/live/boot" ]] ||
    [[ -d "${ROOT}/lib/live/boot" ]]; then
+
     LIVE_BOOT=1
+
     echo "OK: live-boot erkannt."
 fi
 
-if [[ -d "${ROOT}/scripts/casper" ]] ||
-   [[ -f "${ROOT}/scripts/casper-premount" ]] ||
-   [[ -f "${ROOT}/scripts/casper-bottom" ]] ||
-   [[ -d "${ROOT}/usr/share/initramfs-tools/scripts/casper" ]]; then
-    CASPER=1
-    echo "OK: casper erkannt."
+###############################################################################
+# casper / Ubuntu / Mint detection
+#
+# Casper versions differ considerably between releases. Do not rely on a
+# single directory existing.
+###############################################################################
+
+if [[ -d "${ROOT}/scripts" ]]; then
+
+    if find "${ROOT}/scripts" -maxdepth 2 -type f \
+        \( \
+            -name 'casper*' \
+            -o -name '*casper*' \
+        \) \
+        -print -quit 2>/dev/null |
+        grep -q .; then
+
+        CASPER=1
+        echo "OK: casper erkannt."
+    fi
+fi
+
+###############################################################################
+# Additional Mint/Ubuntu live-initrd detection
+#
+# Some Mint initrds don't contain an obvious casper directory, but still
+# contain the live filesystem handling scripts.
+###############################################################################
+
+if [[ ${CASPER} -eq 0 ]]; then
+
+    if find "${ROOT}/scripts" -maxdepth 2 -type f \
+        \( \
+            -name 'live' \
+            -o -name 'live-*' \
+            -o -name 'local' \
+        \) \
+        -print -quit 2>/dev/null |
+        grep -q .; then
+
+        if grep -R -q \
+            -E 'filesystem\.squashfs|/run/live|live-media|casper' \
+            "${ROOT}/scripts" \
+            2>/dev/null; then
+
+            CASPER=1
+            echo "OK: Ubuntu/Mint Live-Initrd erkannt."
+        fi
+    fi
+fi
+
+###############################################################################
+# Generic live-initrd fallback
+#
+# If the initrd contains filesystem.squashfs/live-media handling, it is
+# sufficient for our purpose: we only need to patch the final init.
+###############################################################################
+
+if [[ ${LIVE_BOOT} -eq 0 && ${CASPER} -eq 0 ]]; then
+
+    if grep -R -q \
+        -E 'filesystem\.squashfs|/run/live|live-media|casper|mount_images_in_directory' \
+        "${ROOT}/scripts" \
+        "${ROOT}/usr" \
+        2>/dev/null; then
+
+        CASPER=1
+        echo "OK: generisches Live-Initrd erkannt."
+    fi
 fi
 
 if [[ ${LIVE_BOOT} -eq 0 && ${CASPER} -eq 0 ]]; then
+
+    echo
+    echo "ERROR: Kein unterstütztes Live-System erkannt."
+    echo
+    echo "Vorhandene initramfs scripts:"
+    find "${ROOT}/scripts" -maxdepth 2 -type f \
+        -print 2>/dev/null |
+        sort |
+        head -100
+    echo
+
     die "Kein unterstütztes Live-System erkannt."
 fi
+
 
 ###############################################################################
 # Create final timezone code
