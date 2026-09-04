@@ -472,6 +472,7 @@ if (( CASPER == 1 )); then
     {
         if ($0 ~ /\/scripts\/casper-bottom\/25configure_init([[:space:]]|$)/) {
             print "/scripts/casper-bottom/23timezone \"$@\""
+            print "[ -e /conf/param.conf ] && . /conf/param.conf"
         }
 
         print
