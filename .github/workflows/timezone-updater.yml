@@ -11,6 +11,10 @@ permissions:
 
 jobs:
 
+  # ==========================================================
+  # DISCOVER
+  # ==========================================================
+
   discover:
     name: Find live images
     runs-on: ubuntu-latest
@@ -42,21 +46,41 @@ jobs:
           import re
           import yaml
 
-          with open("config.yml", "r", encoding="utf-8") as f:
+          # --------------------------------------------------
+          # config.yml laden
+          # --------------------------------------------------
+
+          with open(
+              "config.yml",
+              "r",
+              encoding="utf-8"
+          ) as f:
               config = yaml.safe_load(f) or {}
 
-          with open("endpoints.yml", "r", encoding="utf-8") as f:
+          # --------------------------------------------------
+          # endpoints.yml laden
+          # --------------------------------------------------
+
+          with open(
+              "endpoints.yml",
+              "r",
+              encoding="utf-8"
+          ) as f:
               data = yaml.safe_load(f) or {}
 
           endpoints = data.get("endpoints", {})
 
           if not isinstance(endpoints, dict):
               raise SystemExit(
-                  "FEHLER: endpoints.yml enthält kein gültiges "
-                  "'endpoints:' Dictionary."
+                  "FEHLER: endpoints.yml enthält kein "
+                  "gültiges 'endpoints:' Dictionary."
               )
 
           targets = []
+
+          # --------------------------------------------------
+          # Konfigurierte Targets durchlaufen
+          # --------------------------------------------------
 
           for target in config.get("targets", []):
 
@@ -67,7 +91,16 @@ jobs:
               flavors = target.get("flavors", [])
 
               if not wanted_os:
-                  print("WARNING: Target ohne os übersprungen.")
+                  print(
+                      "WARNING: Target ohne 'os' übersprungen."
+                  )
+                  continue
+
+              if not flavors:
+                  print(
+                      f"WARNING: Keine Flavors für "
+                      f"{wanted_os} angegeben."
+                  )
                   continue
 
               for wanted_flavor in flavors:
@@ -77,6 +110,10 @@ jobs:
                   ).strip().lower()
 
                   matches = []
+
+                  # ------------------------------------------
+                  # passende Endpoints suchen
+                  # ------------------------------------------
 
                   for name, endpoint in endpoints.items():
 
@@ -97,12 +134,34 @@ jobs:
                       if endpoint_flavor != wanted_flavor:
                           continue
 
-                      if "initrd" not in endpoint.get("files", []):
+                      files = endpoint.get(
+                          "files",
+                          []
+                      )
+
+                      if "initrd" not in files:
                           continue
 
                       path = str(
-                          endpoint.get("path", "")
+                          endpoint.get(
+                              "path",
+                              ""
+                          )
                       ).strip()
+
+                      # --------------------------------------
+                      # Release-Pfad analysieren
+                      #
+                      # Beispiel:
+                      #
+                      # /ubuntu-squash/releases/download/
+                      # 22-8770cb66/
+                      #
+                      # oder:
+                      #
+                      # /debian-squash/releases/download/
+                      # 2026.2-6fd5ce88/
+                      # --------------------------------------
 
                       match = re.match(
                           r"^/([^/]+)/releases/download/([^/]+)$",
@@ -112,28 +171,65 @@ jobs:
                       if not match:
                           continue
 
+                      repository, release = match.groups()
+
                       matches.append(
-                          (name, endpoint, match.groups())
+                          (
+                              name,
+                              endpoint,
+                              repository,
+                              release
+                          )
                       )
 
+                  # ------------------------------------------
+                  # nichts gefunden
+                  # ------------------------------------------
+
                   if not matches:
+
                       print(
                           f"WARNING: Kein Endpoint für "
                           f"{wanted_os}/{wanted_flavor} gefunden"
                       )
+
                       continue
 
-                  # Höchste Version auswählen.
+                  # ------------------------------------------
+                  # höchste Version auswählen
+                  #
+                  # Die netbootxyz-Datei enthält normalerweise
+                  # bereits nur den aktuellen Endpoint.
+                  # Trotzdem sortieren wir vorsichtshalber.
+                  # ------------------------------------------
+
                   matches.sort(
                       key=lambda item: str(
-                          item[1].get("version", "")
+                          item[1].get(
+                              "version",
+                              ""
+                          )
                       ),
                       reverse=True
                   )
 
-                  name, endpoint, path_info = matches[0]
+                  (
+                      name,
+                      endpoint,
+                      repository,
+                      release
+                  ) = matches[0]
 
-                  repository, release = path_info
+                  version = str(
+                      endpoint.get(
+                          "version",
+                          release
+                      )
+                  )
+
+                  # ------------------------------------------
+                  # Source URL erzeugen
+                  # ------------------------------------------
 
                   source_url = (
                       "https://github.com/"
@@ -143,9 +239,9 @@ jobs:
                       f"{release}/initrd"
                   )
 
-                  version = str(
-                      endpoint.get("version", release)
-                  )
+                  # ------------------------------------------
+                  # eigener Release-Tag
+                  # ------------------------------------------
 
                   release_tag = (
                       f"{wanted_os}-"
@@ -169,16 +265,33 @@ jobs:
                   print(
                       f"OK: {wanted_os}/{wanted_flavor} -> "
                       f"{name} "
-                      f"(Version {version}, Release {release})"
+                      f"(Version {version}, "
+                      f"Release {release})"
                   )
 
+          # --------------------------------------------------
+          # Kein Target gefunden
+          # --------------------------------------------------
+
           if not targets:
+
               raise SystemExit(
                   "Keine passenden Targets gefunden."
               )
 
+          # --------------------------------------------------
+          # Übersicht
+          # --------------------------------------------------
+
           print()
-          print("Gefundene Targets:")
+          print(
+              "============================================================"
+          )
+          print("Gefundene Targets")
+          print(
+              "============================================================"
+          )
+
           print(
               json.dumps(
                   targets,
@@ -187,7 +300,10 @@ jobs:
               )
           )
 
-          # Nur das Array als GitHub-Output ausgeben.
+          # --------------------------------------------------
+          # GitHub Actions Matrix
+          # --------------------------------------------------
+
           matrix = json.dumps(targets)
 
           with open(
@@ -195,17 +311,26 @@ jobs:
               "a",
               encoding="utf-8"
           ) as f:
-              f.write(f"matrix={matrix}\n")
-          PY
 
+              f.write(
+                  f"matrix={matrix}\n"
+              )
+
+  # ==========================================================
+  # PATCH
+  # ==========================================================
 
   patch:
     name: Patch ${{ matrix.os }} ${{ matrix.flavor }}
-    needs: discover
+
+    needs:
+      - discover
 
     strategy:
       fail-fast: false
-      matrix: ${{ fromJson(needs.discover.outputs.matrix) }}
+
+      matrix:
+        include: ${{ fromJson(needs.discover.outputs.matrix) }}
 
     runs-on: ubuntu-latest
 
@@ -214,115 +339,225 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v6
 
+      # ------------------------------------------------------
+      # Abhängigkeiten
+      # ------------------------------------------------------
+
       - name: Install dependencies
         run: |
           sudo apt-get update
+
           sudo apt-get install -y \
             cpio \
             zstd \
             file
 
+      # ------------------------------------------------------
+      # Initrd herunterladen
+      # ------------------------------------------------------
+
       - name: Download initrd
         env:
           SOURCE_URL: ${{ matrix.source_url }}
+
         run: |
-          echo "Download:"
-          echo "$SOURCE_URL"
+
+          echo "============================================================"
+          echo "Download"
+          echo "============================================================"
+
+          echo "OS      : ${{ matrix.os }}"
+          echo "Flavor  : ${{ matrix.flavor }}"
+          echo "Version : ${{ matrix.version }}"
+          echo "Source  : $SOURCE_URL"
+
+          echo
 
           curl -fsSL \
             --retry 5 \
+            --retry-delay 3 \
             "$SOURCE_URL" \
             -o initrd
 
+          echo
+
           file initrd
+
           ls -lh initrd
+
+      # ------------------------------------------------------
+      # Patcher ausführbar machen
+      # ------------------------------------------------------
 
       - name: Make patcher executable
         run: |
           chmod +x scripts/patch-initrd.sh
 
+      # ------------------------------------------------------
+      # Initrd patchen
+      # ------------------------------------------------------
+
       - name: Patch initrd
         run: |
+
           ./scripts/patch-initrd.sh \
             initrd \
             initrd.timezone
 
+      # ------------------------------------------------------
+      # Ergebnis prüfen
+      # ------------------------------------------------------
+
       - name: Verify initrd
         run: |
+
           test -s initrd.timezone
 
+          echo
+          echo "Patched initrd:"
+          echo
+
           file initrd.timezone
+
           ls -lh initrd.timezone
+
+      # ------------------------------------------------------
+      # SHA256
+      # ------------------------------------------------------
 
       - name: Create checksum
         run: |
-          sha256sum initrd.timezone > SHA256SUMS
+
+          sha256sum \
+            initrd.timezone \
+            > SHA256SUMS
+
+          cat SHA256SUMS
+
+      # ------------------------------------------------------
+      # Artifact
+      # ------------------------------------------------------
 
       - name: Upload artifact
         uses: actions/upload-artifact@v6
+
         with:
           name: initrd-timezone-${{ matrix.os }}-${{ matrix.flavor }}
+
           compression-level: 0
+
           if-no-files-found: error
 
           path: |
             initrd.timezone
             SHA256SUMS
 
+  # ==========================================================
+  # RELEASE
+  # ==========================================================
 
   release:
     name: Create release ${{ matrix.os }} ${{ matrix.flavor }}
+
     needs:
       - discover
       - patch
 
     strategy:
       fail-fast: false
-      matrix: ${{ fromJson(needs.discover.outputs.matrix) }}
+
+      matrix:
+        include: ${{ fromJson(needs.discover.outputs.matrix) }}
 
     runs-on: ubuntu-latest
 
     steps:
 
+      # ------------------------------------------------------
+      # Artifact herunterladen
+      # ------------------------------------------------------
+
       - name: Download artifact
         uses: actions/download-artifact@v7
+
         with:
           name: initrd-timezone-${{ matrix.os }}-${{ matrix.flavor }}
+
           path: release-assets
+
+      # ------------------------------------------------------
+      # Dateien anzeigen
+      # ------------------------------------------------------
 
       - name: Show files
         run: |
+
+          echo "Release assets:"
+
           find release-assets \
             -type f \
             -exec ls -lh {} \;
 
+      # ------------------------------------------------------
+      # Prüfen, ob Release bereits existiert
+      # ------------------------------------------------------
+
       - name: Check release
         id: check
+
         env:
           GH_TOKEN: ${{ github.token }}
           RELEASE_TAG: ${{ matrix.release_tag }}
+
         run: |
+
           if gh release view \
               "$RELEASE_TAG" \
               --repo "$GITHUB_REPOSITORY" \
               >/dev/null 2>&1
           then
+
               echo "exists=true" >> "$GITHUB_OUTPUT"
-              echo "Release already exists: $RELEASE_TAG"
+
+              echo
+              echo "Release already exists:"
+              echo "$RELEASE_TAG"
+
           else
+
               echo "exists=false" >> "$GITHUB_OUTPUT"
-              echo "Release does not exist: $RELEASE_TAG"
+
+              echo
+              echo "Release does not exist:"
+              echo "$RELEASE_TAG"
+
           fi
+
+      # ------------------------------------------------------
+      # Release erstellen
+      # ------------------------------------------------------
 
       - name: Create release
         if: steps.check.outputs.exists == 'false'
+
         env:
           GH_TOKEN: ${{ github.token }}
+
           RELEASE_TAG: ${{ matrix.release_tag }}
+
           VERSION: ${{ matrix.version }}
+
           OS: ${{ matrix.os }}
+
           FLAVOR: ${{ matrix.flavor }}
+
         run: |
+
+          echo
+          echo "Creating release:"
+          echo "$RELEASE_TAG"
+          echo
+
           gh release create \
             "$RELEASE_TAG" \
             --repo "$GITHUB_REPOSITORY" \
