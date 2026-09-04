@@ -75,8 +75,10 @@ jobs:
 
           sudo apt-get install -y \
             cpio \
-            zstd \
-            file
+            gzip \
+            lzop \
+            xz-utils \
+            zstd
 
       # ------------------------------------------------------
       # Initrd herunterladen
