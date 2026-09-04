@@ -81,7 +81,7 @@ echo "==> Entpacke Initrd ..."
 
 cd "$ROOT"
 
-zstd -dc "$INPUT" | cpio -idm --quiet
+zstd -dc "$INPUT" | sudo cpio -idm --quiet
 
 cd - >/dev/null
 
@@ -281,8 +281,8 @@ rm -f "$OUTPUT"
 
 cd "$ROOT"
 
-find . -print0 \
-    | cpio --null -o -H newc --quiet \
+sudo find . -print0 \
+    | sudo cpio --null -o -H newc --quiet \
     | zstd -T0 -19 -o "$OUTPUT"
 
 cd - >/dev/null
