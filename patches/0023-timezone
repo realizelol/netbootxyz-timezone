@@ -2,10 +2,8 @@
 
 timezone_setup()
 {
-    local tz=""
-    local arg
+    tz=""
 
-    # Read timezone= from the kernel command line.
     for arg in $(cat /proc/cmdline); do
         case "$arg" in
             timezone=*)
@@ -14,47 +12,35 @@ timezone_setup()
         esac
     done
 
-    # No timezone= parameter: nothing to do.
     if [ -z "$tz" ]; then
         return 0
     fi
 
-    # Basic path traversal / whitespace protection.
     case "$tz" in
         /*|*..*|*" "*)
-            echo "timezone: invalid timezone: ${tz}" >&2
+            echo "timezone: invalid timezone: $tz" >&2
             return 0
             ;;
     esac
-
-    echo "timezone: rootmnt=${rootmnt}"
-    echo "timezone: setting timezone to ${tz}"
-
-    # At this point rootmnt must already contain the real Live root.
-    if [ ! -d "${rootmnt}/usr/share/zoneinfo" ]; then
-        echo "timezone: zoneinfo directory not available in ${rootmnt}" >&2
-        return 0
-    fi
 
     if [ ! -f "${rootmnt}/usr/share/zoneinfo/${tz}" ]; then
         echo "timezone: unknown timezone: ${tz}" >&2
         return 0
     fi
 
+    echo "timezone: rootmnt=${rootmnt}"
+    echo "timezone: setting timezone to ${tz}"
+
     echo "timezone: BEFORE:"
     ls -l "${rootmnt}/etc/localtime" 2>&1 || true
     cat "${rootmnt}/etc/timezone" 2>&1 || true
 
-    # Remove the existing /etc/localtime symlink/file.
     rm -f "${rootmnt}/etc/localtime"
 
-    # The symlink is intentionally absolute from the perspective
-    # of the final root filesystem.
     ln -s \
         "/usr/share/zoneinfo/${tz}" \
         "${rootmnt}/etc/localtime"
 
-    # Debian/Kali also uses /etc/timezone.
     printf '%s\n' "${tz}" > "${rootmnt}/etc/timezone"
 
     echo "timezone: AFTER:"
