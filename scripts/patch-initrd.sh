@@ -22,7 +22,8 @@ OUTPUT="${2:-initrd.timezone}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
-PATCH="$REPO_ROOT/patches/0023-timezone"
+LIVEBOOT_PATCH="$REPO_ROOT/patches/0023-timezone"
+CASPER_PATCH="$REPO_ROOT/patches/23timezone"
 
 WORK="$(mktemp -d /tmp/timezone-patch-XXXXXXXX)"
 ROOT="$WORK/root"
@@ -215,11 +216,14 @@ echo
 # Check patch
 # ============================================================
 
-[[ -f "$PATCH" ]] ||
-    die "Timezone-Hook '$PATCH' nicht gefunden."
+[[ -f "$LIVEBOOT_PATCH" ]] ||
+    die "Timezone-Hook '$LIVEBOOT_PATCH' nicht gefunden."
+[[ -f "$CASPER_PATCH" ]] ||
+    die "Timezone-Hook '$CASPER_PATCH' nicht gefunden."
 
 echo "Timezone hook:"
-echo "$PATCH"
+echo "$LIVEBOOT_PATCH"
+echo "$CASPER_PATCH"
 echo
 
 
@@ -318,7 +322,7 @@ if (( LIVE_BOOT == 1 )); then
     echo
 
     install -m 0755 \
-        "$PATCH" \
+        "$LIVEBOOT_PATCH" \
         "$ROOT/usr/lib/live/boot/0023-timezone"
 
     echo "Installed:"
@@ -413,9 +417,9 @@ if (( CASPER == 1 )); then
     # --------------------------------------------------------
     # Install hook
     # --------------------------------------------------------
-
-    sed -e '1{/^timezone_setup()/d}' -e '{/^}/d}' -e 's/\breturn 0\b/exit 0/g' -e 's/\blocal \b//g' "$PATCH" > "$CASPER_DIR/23timezone"
-    chmod 755 "$CASPER_DIR/23timezone"
+    install -m 0755 \
+        "$CASPER_PATCH" \
+        "$CASPER_DIR/23timezone"
 
     echo "Installed:"
     echo "  $CASPER_DIR/23timezone"
