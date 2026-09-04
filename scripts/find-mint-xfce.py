@@ -2,144 +2,146 @@
 
 import os
 import re
-import sys
 import yaml
 
 
-ENDPOINTS_FILE = "endpoints.yml"
+with open("endpoints.yml", "r", encoding="utf-8") as f:
+    data = yaml.safe_load(f)
 
 
-def version_key(version):
-    return [
-        int(x)
-        for x in re.findall(r"\d+", str(version))
-    ]
+endpoints = data.get("endpoints", {})
+
+matches = []
 
 
-def main():
-    with open(ENDPOINTS_FILE, "r", encoding="utf-8") as f:
-        data = yaml.safe_load(f)
+for name, entry in endpoints.items():
 
-    endpoints = data.get("endpoints", {})
+    if not isinstance(entry, dict):
+        continue
 
-    matches = []
+    if str(entry.get("os", "")).lower() != "mint":
+        continue
 
-    for name, entry in endpoints.items():
-        if not isinstance(entry, dict):
-            continue
+    if str(entry.get("flavor", "")).lower() != "xfce":
+        continue
 
-        if str(entry.get("os", "")).lower() != "mint":
-            continue
+    path = entry.get("path")
 
-        if str(entry.get("flavor", "")).lower() != "xfce":
-            continue
+    if not path:
+        continue
 
-        path = entry.get("path")
+    if "initrd" not in entry.get("files", []):
+        continue
 
-        if not path:
-            continue
+    version = str(entry.get("version", ""))
 
-        files = entry.get("files", [])
-
-        if "initrd" not in files:
-            continue
-
-        version = str(entry.get("version", ""))
-
-        matches.append({
+    matches.append(
+        {
             "name": name,
             "version": version,
             "path": path,
-        })
-
-    if not matches:
-        print(
-            "ERROR: Kein Linux-Mint-XFCE-Endpoint gefunden.",
-            file=sys.stderr
-        )
-        sys.exit(1)
-
-    matches.sort(
-        key=lambda x: version_key(x["version"]),
-        reverse=True
+        }
     )
 
-    selected = matches[0]
 
-    print("Gefundene Mint-XFCE-Endpoints:")
-    print()
+if not matches:
+    raise SystemExit(
+        "ERROR: Kein Linux Mint XFCE Endpoint gefunden."
+    )
 
-    for item in matches:
-        print(
-            f"  {item['name']} | "
-            f"Version {item['version']} | "
-            f"{item['path']}"
+
+def version_key(item):
+    return [
+        int(x)
+        for x in re.findall(
+            r"\d+",
+            item["version"]
         )
+    ]
 
-    print()
-    print("Ausgewählt:")
+
+matches.sort(
+    key=version_key,
+    reverse=True
+)
+
+
+selected = matches[0]
+
+
+print("Gefundene Mint XFCE Endpoints:")
+
+for item in matches:
     print(
-        f"  {selected['name']} | "
-        f"Version {selected['version']} | "
-        f"{selected['path']}"
+        item["name"],
+        "|",
+        item["version"],
+        "|",
+        item["path"]
     )
 
-    path = selected["path"].strip("/")
 
-    marker = "releases/download/"
+path = selected["path"].strip("/")
 
-    if marker not in path:
-        print(
-            f"ERROR: Unerwarteter Endpoint-Pfad: "
-            f"{selected['path']}",
-            file=sys.stderr
+marker = "releases/download/"
+
+if marker not in path:
+    raise SystemExit(
+        "ERROR: Unerwarteter Path: "
+        + selected["path"]
+    )
+
+
+source_release = path.split(
+    marker,
+    1
+)[1].strip("/")
+
+
+source_url = (
+    "https://github.com/"
+    "netbootxyz/ubuntu-squash/"
+    "releases/download/"
+    + source_release
+    + "/initrd"
+)
+
+
+release_tag = "mint-xfce-" + source_release
+
+
+print()
+print("Ausgewählt:")
+print("Endpoint:", selected["name"])
+print("Version:", selected["version"])
+print("Source:", source_url)
+print("Release:", release_tag)
+
+
+output = os.environ.get("GITHUB_OUTPUT")
+
+if output:
+
+    with open(
+        output,
+        "a",
+        encoding="utf-8"
+    ) as f:
+
+        f.write(
+            "version="
+            + selected["version"]
+            + "\n"
         )
-        sys.exit(1)
 
-    source_release = path.split(
-        marker,
-        1
-    )[1].strip("/")
+        f.write(
+            "source_url="
+            + source_url
+            + "\n"
+        )
 
-    source_url = (
-        "https://github.com/"
-        "netbootxyz/ubuntu-squash/releases/download/"
-        f"{source_release}/initrd"
-    )
-
-    release_tag = f"mint-xfce-{source_release}"
-
-    github_output = os.environ.get("GITHUB_OUTPUT")
-
-    if github_output:
-        with open(
-            github_output,
-            "a",
-            encoding="utf-8"
-        ) as f:
-            f.write(
-                f"endpoint={selected['name']}\n"
-            )
-            f.write(
-                f"version={selected['version']}\n"
-            )
-            f.write(
-                f"path={selected['path']}\n"
-            )
-            f.write(
-                f"source_url={source_url}\n"
-            )
-            f.write(
-                f"release_tag={release_tag}\n"
-            )
-
-    print()
-    print(f"Endpoint   : {selected['name']}")
-    print(f"Version    : {selected['version']}")
-    print(f"Path       : {selected['path']}")
-    print(f"Source URL : {source_url}")
-    print(f"Release    : {release_tag}")
-
-
-if __name__ == "__main__":
-    main()
+        f.write(
+            "release_tag="
+            + release_tag
+            + "\n"
+        )
