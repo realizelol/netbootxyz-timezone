@@ -8,7 +8,6 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 CASPER_PATCH="$REPO_ROOT/patches/23timezone"
 LIVE_PATCH="$REPO_ROOT/patches/0100-timezone.sh"
 
-
 usage()
 {
     echo "Usage:"
@@ -18,7 +17,6 @@ usage()
     exit 1
 }
 
-
 die()
 {
     echo
@@ -26,31 +24,18 @@ die()
     exit 1
 }
 
-
 [[ $# -eq 2 ]] || usage
-
 
 INPUT="$(realpath "$1")"
 OUTPUT="$(realpath "$2")"
 
-
 [[ -f "$INPUT" ]] \
     || die "Input initrd not found: $INPUT"
-
-
-[[ -f "$CASPER_PATCH" ]] \
-    || die "Casper timezone hook not found: $CASPER_PATCH"
-
-
-[[ -f "$LIVE_PATCH" ]] \
-    || die "live-boot timezone hook not found: $LIVE_PATCH"
-
 
 for cmd in zstd cpio file lsinitramfs sha256sum awk sed grep; do
     command -v "$cmd" >/dev/null 2>&1 \
         || die "Required command not found: $cmd"
 done
-
 
 WORK="$(mktemp -d -t timezone-patch-XXXXXXXX)"
 
@@ -129,6 +114,20 @@ fi
 
 if (( CASPER == 0 && LIVE_BOOT == 0 )); then
     die "Weder casper noch live-boot erkannt."
+fi
+
+# ============================================================
+# Prüfe benötigte Patch-Dateien
+# ============================================================
+
+if (( CASPER == 1 )); then
+    [[ -f "$CASPER_PATCH" ]] \
+        || die "Casper timezone hook not found: $CASPER_PATCH"
+fi
+
+if (( LIVE_BOOT == 1 )); then
+    [[ -f "$LIVE_PATCH" ]] \
+        || die "live-boot timezone hook not found: $LIVE_PATCH"
 fi
 
 
