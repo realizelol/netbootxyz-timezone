@@ -2,6 +2,10 @@
 
 set -Eeuo pipefail
 
+if [[ $EUID -ne 0 ]]; then
+    exec sudo "$0" "$@"
+fi
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
@@ -81,7 +85,7 @@ echo "==> Entpacke Initrd ..."
 
 cd "$ROOT"
 
-zstd -dc "$INPUT" | sudo cpio -idm --quiet
+zstd -dc "$INPUT" | cpio -idm --quiet
 
 cd - >/dev/null
 
@@ -281,8 +285,8 @@ rm -f "$OUTPUT"
 
 cd "$ROOT"
 
-sudo find . -print0 \
-    | sudo cpio --null -o -H newc --quiet \
+find . -print0 \
+    | cpio --null -o -H newc --quiet \
     | zstd -T0 -19 -o "$OUTPUT"
 
 cd - >/dev/null
