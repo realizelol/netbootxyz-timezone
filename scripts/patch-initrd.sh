@@ -325,29 +325,37 @@ cd - >/dev/null
 
 if [ "$CASPER" -eq 1 ]; then
 
-    if grep -Fxq \
-        "./scripts/casper-bottom/23timezone" \
+    if grep -Eq \
+        '(^|/)scripts/casper-bottom/23timezone$' \
         "$WORKDIR/filelist"
     then
         echo "OK: casper Timezone-Hook ist in der neuen Initrd."
     else
         echo "FEHLER: casper Timezone-Hook fehlt."
+        echo
+        echo "Gefundene Timezone-Einträge:"
+        grep -E 'timezone|localtime' "$WORKDIR/filelist" || true
         exit 1
     fi
+
 
 fi
 
 if [ "$LIVE_BOOT" -eq 1 ]; then
 
-    if grep -Fxq \
-        "./usr/lib/live/boot/0100-timezone.sh" \
+    if grep -Eq \
+        '(^|/)usr/lib/live/boot/0100-timezone\.sh$' \
         "$WORKDIR/filelist"
     then
         echo "OK: live-boot Timezone-Hook ist in der neuen Initrd."
     else
         echo "FEHLER: live-boot Timezone-Hook fehlt."
+        echo
+        echo "Gefundene Timezone-Einträge:"
+        grep -E 'timezone|localtime' "$WORKDIR/filelist" || true
         exit 1
     fi
+
 
 fi
 
