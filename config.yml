@@ -1,0 +1,10 @@
+targets:
+  - os: mint
+    flavors:
+      - xfce
+      - mate
+      - cinnamon
+
+  - os: kali
+    flavors:
+      - xfce
