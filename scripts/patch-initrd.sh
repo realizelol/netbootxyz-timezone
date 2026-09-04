@@ -50,16 +50,11 @@ die()
 
 [[ $# -eq 2 ]] || usage
 
-
 INPUT="$(realpath "$1")"
 OUTPUT="$(realpath "$2")"
 
-
-[[ -f "$INPUT" ]] \
-    || die "Input initrd not found: $INPUT"
-
-[[ -f "$PATCH_FILE" ]] \
-    || die "Timezone hook not found: $PATCH_FILE"
+[[ -f "$INPUT" ]] || die "Input initrd not found: $INPUT"
+[[ -f "$PATCH_FILE" ]] || die "Timezone hook not found: $PATCH_FILE"
 
 
 # ============================================================
@@ -67,8 +62,8 @@ OUTPUT="$(realpath "$2")"
 # ============================================================
 
 for cmd in zstd cpio file find grep sed awk lsinitramfs sha256sum install; do
-    command -v "$cmd" >/dev/null 2>&1 \
-        || die "Required command not found: $cmd"
+    command -v "$cmd" >/dev/null 2>&1 ||
+        die "Required command not found: $cmd"
 done
 
 
@@ -134,7 +129,6 @@ zstd -dc "$INPUT" | cpio -idm --quiet
 echo
 echo "==> Erkenne Live-System ..."
 
-
 SYSTEM=""
 
 if [[ -d "$ROOT/scripts/casper-bottom" ]] &&
@@ -159,25 +153,34 @@ fi
 
 
 # ============================================================
-# Casper / Linux Mint
+# Casper
 # ============================================================
 
-patch_casper()
-{
+if [[ "$SYSTEM" == "casper" ]]; then
+
+    HOOK="$ROOT/scripts/casper-bottom/23timezone"
+    ORDER="$ROOT/scripts/casper-bottom/ORDER"
+    TMP_ORDER="$WORK/ORDER.new"
+
+
     echo
     echo "==> Erzeuge casper Timezone-Hook ..."
 
-    local hook="$ROOT/scripts/casper-bottom/23timezone"
-    local order="$ROOT/scripts/casper-bottom/ORDER"
-    local tmp_order="$WORK/ORDER.new"
 
     # --------------------------------------------------------
-    # Install hook
+    # Install common timezone function
     # --------------------------------------------------------
 
     install -m 0755 \
         "$PATCH_FILE" \
-        "$hook"
+        "$HOOK"
+
+
+    # Casper muss die Funktion tatsächlich ausführen.
+    cat >> "$HOOK" <<'EOF'
+
+timezone_setup
+EOF
 
 
     # --------------------------------------------------------
@@ -187,10 +190,11 @@ patch_casper()
     echo
     echo "==> Aktualisiere casper-bottom/ORDER ..."
 
-    # Vorhandenen Eintrag entfernen.
+
+    # Alten Eintrag entfernen.
     sed -i \
         '\#/scripts/casper-bottom/23timezone#d' \
-        "$order"
+        "$ORDER"
 
 
     # Vor 25configure_init einfügen.
@@ -202,9 +206,10 @@ patch_casper()
 
         print
     }
-    ' "$order" > "$tmp_order"
+    ' "$ORDER" > "$TMP_ORDER"
 
-    mv "$tmp_order" "$order"
+
+    mv "$TMP_ORDER" "$ORDER"
 
 
     # --------------------------------------------------------
@@ -217,40 +222,39 @@ patch_casper()
 
     grep -n -E \
         '/scripts/casper-bottom/(23timezone|25configure_init)' \
-        "$order" \
+        "$ORDER" \
         || true
 
 
-    local tz_line
-    local config_line
-
-    tz_line="$(
+    TZ_LINE="$(
         grep -n \
             '/scripts/casper-bottom/23timezone' \
-            "$order" \
-            | head -n1 \
-            | cut -d: -f1 \
-            || true
+            "$ORDER" |
+        head -n1 |
+        cut -d: -f1 ||
+        true
     )"
 
-    config_line="$(
+
+    CONFIG_LINE="$(
         grep -n \
             '/scripts/casper-bottom/25configure_init' \
-            "$order" \
-            | head -n1 \
-            | cut -d: -f1 \
-            || true
+            "$ORDER" |
+        head -n1 |
+        cut -d: -f1 ||
+        true
     )"
 
 
-    [[ -n "$tz_line" ]] \
-        || die "23timezone fehlt in ORDER."
-
-    [[ -n "$config_line" ]] \
-        || die "25configure_init fehlt in ORDER."
+    [[ -n "$TZ_LINE" ]] ||
+        die "23timezone fehlt in ORDER."
 
 
-    if (( tz_line >= config_line )); then
+    [[ -n "$CONFIG_LINE" ]] ||
+        die "25configure_init fehlt in ORDER."
+
+
+    if (( TZ_LINE >= CONFIG_LINE )); then
         die "23timezone steht nicht vor 25configure_init."
     fi
 
@@ -266,50 +270,49 @@ patch_casper()
     echo
     echo "==> Prüfe eingebauten Hook ..."
 
-    [[ -x "$hook" ]] \
-        || die "casper Timezone-Hook fehlt."
+
+    [[ -x "$HOOK" ]] ||
+        die "casper Timezone-Hook fehlt."
+
+
+    grep -Fq 'timezone_setup' "$HOOK" ||
+        die "timezone_setup fehlt im Casper-Hook."
+
+
+    grep -Fq 'timezone=' "$HOOK" ||
+        die "timezone= fehlt im Casper-Hook."
+
 
     echo "OK: casper Hook vorhanden."
-}
+
+fi
 
 
 # ============================================================
 # live-boot / Kali
 # ============================================================
 
-patch_live_boot()
-{
+if [[ "$SYSTEM" == "live-boot" ]]; then
+
+    COMPONENT="$ROOT/usr/lib/live/boot/023-timezone"
+    MAIN="$ROOT/usr/lib/live/boot/9990-main.sh"
+
+
     echo
     echo "==> Erzeuge live-boot Timezone-Hook ..."
 
 
-    local component="$ROOT/usr/lib/live/boot/023-timezone"
-    local main="$ROOT/usr/lib/live/boot/9990-main.sh"
-
-
     # --------------------------------------------------------
-    # Create live-boot component
+    # Install common timezone function
     # --------------------------------------------------------
 
-    cat > "$component" <<EOF
-#!/bin/sh
-
-$(cat "$PATCH_FILE")
-EOF
-
-    chmod 0755 "$component"
+    install -m 0755 \
+        "$PATCH_FILE" \
+        "$COMPONENT"
 
 
     echo "OK: live-boot Hook:"
-    echo "    $component"
-
-
-    # --------------------------------------------------------
-    # Verify component
-    # --------------------------------------------------------
-
-    [[ -x "$component" ]] \
-        || die "live-boot timezone hook konnte nicht erstellt werden."
+    echo "    $COMPONENT"
 
 
     # --------------------------------------------------------
@@ -320,30 +323,32 @@ EOF
     echo "==> Patch 9990-main.sh ..."
 
 
-    # Nicht mehrfach patchen.
-    if grep -Fq \
-        'timezone_setup' \
-        "$main"; then
+    if grep -Fq 'timezone_setup' "$MAIN"; then
 
-        echo "WARNUNG: timezone_setup ist bereits in 9990-main.sh vorhanden."
+        echo "WARNUNG: timezone_setup bereits vorhanden."
 
     else
 
-        local tmp_main="$WORK/9990-main.sh.new"
+        MAIN_TMP="$WORK/9990-main.sh.new"
+
 
         awk '
         {
             print
 
-            if (
-                !inserted &&
-                $0 ~ /mount_images_in_directory "\$\{livefs_root\}" "\$\{rootmnt\}" "\$\{mac\}"/
-            ) {
+            if (!inserted &&
+                $0 ~ /^[[:space:]]*fi[[:space:]]*$/ &&
+                previous_block &&
+                previous_block ~ /mount_images_in_directory|setup_unionfs/) {
+
                 print ""
-                print "\t# Apply timezone from kernel command line after live rootfs is mounted."
+                print "\t# Apply timezone after the live rootfs has been mounted."
                 print "\ttimezone_setup"
+
                 inserted=1
             }
+
+            previous_block=$0
         }
 
         END {
@@ -351,51 +356,39 @@ EOF
                 exit 42
             }
         }
-        ' "$main" > "$tmp_main" \
-            || die "Konnte timezone_setup nicht in 9990-main.sh einfügen."
+        ' "$MAIN" > "$MAIN_TMP"
 
-        mv "$tmp_main" "$main"
 
-        chmod 0755 "$main"
-    }
+        if [[ $? -ne 0 ]]; then
+            die "Konnte timezone_setup nicht in 9990-main.sh einfügen."
+        fi
+
+
+        mv "$MAIN_TMP" "$MAIN"
+
+        chmod 0755 "$MAIN"
+
+    fi
 
 
     # --------------------------------------------------------
-    # Verify patch
+    # Verify main script
     # --------------------------------------------------------
 
     echo
     echo "==> Prüfe 9990-main.sh ..."
 
-    grep -n -C 4 \
+
+    grep -n -C 5 \
         'timezone_setup' \
-        "$main" \
-        || die "timezone_setup fehlt in 9990-main.sh."
+        "$MAIN" ||
+        die "timezone_setup fehlt in 9990-main.sh."
+
 
     echo
     echo "OK: live-boot wurde gepatcht."
-}
 
-
-# ============================================================
-# Apply system-specific patch
-# ============================================================
-
-case "$SYSTEM" in
-
-    casper)
-        patch_casper
-        ;;
-
-    live-boot)
-        patch_live_boot
-        ;;
-
-    *)
-        die "Interner Fehler: unbekanntes System '$SYSTEM'."
-        ;;
-
-esac
+fi
 
 
 # ============================================================
@@ -410,13 +403,13 @@ rm -f "$OUTPUT"
 
 cd "$ROOT"
 
-find . -print0 \
-    | cpio --null -o -H newc --quiet \
-    | zstd -T0 -19 -o "$OUTPUT"
+find . -print0 |
+    cpio --null -o -H newc --quiet |
+    zstd -T0 -19 -o "$OUTPUT"
 
 
-[[ -s "$OUTPUT" ]] \
-    || die "Output wurde nicht erzeugt."
+[[ -s "$OUTPUT" ]] ||
+    die "Output wurde nicht erzeugt."
 
 
 # ============================================================
@@ -449,8 +442,8 @@ if [[ "$SYSTEM" == "casper" ]]; then
 
     grep -Fq \
         'scripts/casper-bottom/23timezone' \
-        "$LISTING" \
-        || die "casper Timezone-Hook fehlt."
+        "$LISTING" ||
+        die "casper Timezone-Hook fehlt."
 
     echo "OK: casper Timezone-Hook vorhanden."
 
@@ -459,20 +452,21 @@ elif [[ "$SYSTEM" == "live-boot" ]]; then
 
     grep -Fq \
         'usr/lib/live/boot/023-timezone' \
-        "$LISTING" \
-        || die "live-boot Timezone-Hook fehlt."
+        "$LISTING" ||
+        die "live-boot Timezone-Hook fehlt."
 
     grep -Fq \
         'usr/lib/live/boot/9990-main.sh' \
-        "$LISTING" \
-        || die "9990-main.sh fehlt."
+        "$LISTING" ||
+        die "9990-main.sh fehlt."
 
     echo "OK: live-boot Timezone-Hook vorhanden."
+
 fi
 
 
 # ============================================================
-# Extract resulting initrd for deeper verification
+# Extract resulting initrd for deep verification
 # ============================================================
 
 echo
@@ -493,43 +487,52 @@ if [[ "$SYSTEM" == "casper" ]]; then
     NEW_ORDER="$VERIFY/scripts/casper-bottom/ORDER"
 
 
-    [[ -f "$NEW_HOOK" ]] \
-        || die "23timezone fehlt in der neuen Initrd."
+    [[ -f "$NEW_HOOK" ]] ||
+        die "23timezone fehlt in der neuen Initrd."
 
-    [[ -f "$NEW_ORDER" ]] \
-        || die "ORDER fehlt in der neuen Initrd."
+
+    [[ -f "$NEW_ORDER" ]] ||
+        die "ORDER fehlt in der neuen Initrd."
 
 
     grep -Fq \
         'timezone=' \
-        "$NEW_HOOK" \
-        || die "timezone= fehlt im Casper-Hook."
+        "$NEW_HOOK" ||
+        die "timezone= fehlt im Casper-Hook."
+
+
+    grep -Fq \
+        'timezone_setup' \
+        "$NEW_HOOK" ||
+        die "timezone_setup fehlt im Casper-Hook."
 
 
     TZ_LINE="$(
         grep -n \
             '/scripts/casper-bottom/23timezone' \
-            "$NEW_ORDER" \
-            | head -n1 \
-            | cut -d: -f1 \
-            || true
+            "$NEW_ORDER" |
+        head -n1 |
+        cut -d: -f1 ||
+        true
     )"
+
 
     CONFIG_LINE="$(
         grep -n \
             '/scripts/casper-bottom/25configure_init' \
-            "$NEW_ORDER" \
-            | head -n1 \
-            | cut -d: -f1 \
-            || true
+            "$NEW_ORDER" |
+        head -n1 |
+        cut -d: -f1 ||
+        true
     )"
 
 
-    [[ -n "$TZ_LINE" ]] \
-        || die "23timezone fehlt in ORDER der neuen Initrd."
+    [[ -n "$TZ_LINE" ]] ||
+        die "23timezone fehlt in ORDER der neuen Initrd."
 
-    [[ -n "$CONFIG_LINE" ]] \
-        || die "25configure_init fehlt in ORDER der neuen Initrd."
+
+    [[ -n "$CONFIG_LINE" ]] ||
+        die "25configure_init fehlt in ORDER der neuen Initrd."
 
 
     if (( TZ_LINE >= CONFIG_LINE )); then
@@ -546,22 +549,30 @@ elif [[ "$SYSTEM" == "live-boot" ]]; then
     NEW_MAIN="$VERIFY/usr/lib/live/boot/9990-main.sh"
 
 
-    [[ -f "$NEW_COMPONENT" ]] \
-        || die "023-timezone fehlt in der neuen Initrd."
+    [[ -f "$NEW_COMPONENT" ]] ||
+        die "023-timezone fehlt in der neuen Initrd."
 
-    [[ -f "$NEW_MAIN" ]] \
-        || die "9990-main.sh fehlt in der neuen Initrd."
+
+    [[ -f "$NEW_MAIN" ]] ||
+        die "9990-main.sh fehlt in der neuen Initrd."
+
+
+    grep -Fq \
+        'timezone_setup' \
+        "$NEW_COMPONENT" ||
+        die "timezone_setup fehlt in 023-timezone."
+
+
+    grep -Fq \
+        'timezone=' \
+        "$NEW_COMPONENT" ||
+        die "timezone= fehlt in 023-timezone."
 
 
     grep -Fq \
         'timezone_setup' \
-        "$NEW_COMPONENT" \
-        || die "timezone_setup fehlt in 023-timezone."
-
-    grep -Fq \
-        'timezone_setup' \
-        "$NEW_MAIN" \
-        || die "timezone_setup fehlt in 9990-main.sh."
+        "$NEW_MAIN" ||
+        die "timezone_setup fehlt in 9990-main.sh."
 
 
     echo "OK: live-boot timezone_setup ist eingebaut."
@@ -573,8 +584,8 @@ elif [[ "$SYSTEM" == "live-boot" ]]; then
 
     grep -n -C 5 \
         'timezone_setup' \
-        "$NEW_MAIN" \
-        || true
+        "$NEW_MAIN" ||
+        true
 
 fi
 
