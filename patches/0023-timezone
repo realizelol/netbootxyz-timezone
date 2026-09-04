@@ -23,7 +23,7 @@ timezone_setup()
             ;;
     esac
 
-    if [ ! -f "/usr/share/zoneinfo/$tz" ]; then
+    if [ ! -f "/root/usr/share/zoneinfo/$tz" ]; then
         echo "timezone: unknown timezone: $tz" >&2
         return 0
     fi
