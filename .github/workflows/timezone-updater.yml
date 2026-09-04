@@ -1,0 +1,304 @@
+name: Live timezone initrd
+
+on:
+  workflow_dispatch:
+
+  schedule:
+    - cron: "15 4 * * *"
+
+permissions:
+  contents: write
+
+jobs:
+
+  discover:
+    name: Find live images
+    runs-on: ubuntu-latest
+
+    outputs:
+      matrix: ${{ steps.find.outputs.matrix }}
+
+    steps:
+
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Install Python YAML
+        run: |
+          pip3 install pyyaml
+
+      - name: Download endpoints.yml
+        run: |
+          curl -fsSL \
+            https://raw.githubusercontent.com/netbootxyz/netboot.xyz/development/endpoints.yml \
+            -o endpoints.yml
+
+      - name: Find configured targets
+        id: find
+        run: |
+          python3 <<'PY'
+          import json
+          import os
+          import yaml
+
+          with open("config.yml", "r", encoding="utf-8") as f:
+              config = yaml.safe_load(f)
+
+          with open("endpoints.yml", "r", encoding="utf-8") as f:
+              endpoints = yaml.safe_load(f)
+
+          targets = []
+
+          for target in config.get("targets", []):
+
+              wanted_os = str(target["os"]).lower()
+
+              flavors = target.get("flavors", [])
+
+              for wanted_flavor in flavors:
+
+                  wanted_flavor = str(wanted_flavor).lower()
+
+                  matches = []
+
+                  for name, endpoint in endpoints.items():
+
+                      if not isinstance(endpoint, dict):
+                          continue
+
+                      endpoint_os = str(
+                          endpoint.get("os", "")
+                      ).lower()
+
+                      endpoint_flavor = str(
+                          endpoint.get("flavor", "")
+                      ).lower()
+
+                      if endpoint_os != wanted_os:
+                          continue
+
+                      if endpoint_flavor != wanted_flavor:
+                          continue
+
+                      path = str(
+                          endpoint.get("path", "")
+                      )
+
+                      if "/releases/download/" not in path:
+                          continue
+
+                      if "initrd" not in endpoint.get(
+                          "files", []
+                      ):
+                          continue
+
+                      matches.append(
+                          (name, endpoint)
+                      )
+
+                  if not matches:
+
+                      print(
+                          f"WARNING: Kein Endpoint für "
+                          f"{wanted_os}/{wanted_flavor} gefunden"
+                      )
+
+                      continue
+
+                  name, endpoint = matches[0]
+
+                  path = endpoint["path"].rstrip("/")
+
+                  release = path.split("/")[-1]
+
+                  source_url = (
+                      "https://github.com/"
+                      "netbootxyz/ubuntu-squash/"
+                      "releases/download/"
+                      f"{release}/initrd"
+                  )
+
+                  release_tag = (
+                      f"{wanted_os}-{wanted_flavor}-{release}"
+                  )
+
+                  targets.append({
+                      "os": wanted_os,
+                      "flavor": wanted_flavor,
+                      "endpoint": name,
+                      "version": str(
+                          endpoint.get(
+                              "version",
+                              release
+                          )
+                      ),
+                      "release": release,
+                      "source_url": source_url,
+                      "release_tag": release_tag
+                  })
+
+          if not targets:
+              raise SystemExit(
+                  "Keine passenden Targets gefunden."
+              )
+
+          print()
+          print("Gefundene Targets:")
+          print(
+              json.dumps(
+                  targets,
+                  indent=2,
+                  ensure_ascii=False
+              )
+          )
+
+          matrix = {
+              "include": targets
+          }
+
+          with open(
+              os.environ["GITHUB_OUTPUT"],
+              "a"
+          ) as f:
+
+              f.write(
+                  "matrix=" +
+                  json.dumps(
+                      json.dumps(matrix)
+                  ) +
+                  "\n"
+              )
+          PY
+
+
+  patch:
+    name: Patch ${{ matrix.os }} ${{ matrix.flavor }}
+    needs: discover
+
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJson(needs.discover.outputs.matrix) }}
+
+    runs-on: ubuntu-latest
+
+    steps:
+
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            cpio \
+            zstd \
+            file
+
+      - name: Download initrd
+        env:
+          SOURCE_URL: ${{ matrix.source_url }}
+        run: |
+          echo "Download:"
+          echo "$SOURCE_URL"
+
+          curl -fsSL \
+            --retry 5 \
+            "$SOURCE_URL" \
+            -o initrd
+
+          file initrd
+          ls -lh initrd
+
+      - name: Make patcher executable
+        run: |
+          chmod +x scripts/patch-initrd.sh
+
+      - name: Patch initrd
+        run: |
+          ./scripts/patch-initrd.sh \
+            initrd \
+            initrd.timezone
+
+      - name: Verify initrd
+        run: |
+          test -s initrd.timezone
+
+          file initrd.timezone
+          ls -lh initrd.timezone
+
+      - name: Create checksum
+        run: |
+          sha256sum initrd.timezone > SHA256SUMS
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v6
+        with:
+          name: initrd-timezone-${{ matrix.os }}-${{ matrix.flavor }}
+          compression-level: 0
+          if-no-files-found: error
+
+          path: |
+            initrd.timezone
+            SHA256SUMS
+
+
+  release:
+    name: Create release ${{ matrix.os }} ${{ matrix.flavor }}
+    needs:
+      - discover
+      - patch
+
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJson(needs.discover.outputs.matrix) }}
+
+    runs-on: ubuntu-latest
+
+    steps:
+
+      - name: Download artifact
+        uses: actions/download-artifact@v7
+        with:
+          name: initrd-timezone-${{ matrix.os }}-${{ matrix.flavor }}
+          path: release-assets
+
+      - name: Show files
+        run: |
+          find release-assets \
+            -type f \
+            -exec ls -lh {} \;
+
+      - name: Check release
+        id: check
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ matrix.release_tag }}
+        run: |
+          if gh release view \
+              "$RELEASE_TAG" \
+              --repo "$GITHUB_REPOSITORY" \
+              >/dev/null 2>&1
+          then
+              echo "exists=true" >> "$GITHUB_OUTPUT"
+              echo "Release already exists: $RELEASE_TAG"
+          else
+              echo "exists=false" >> "$GITHUB_OUTPUT"
+              echo "Release does not exist: $RELEASE_TAG"
+          fi
+
+      - name: Create release
+        if: steps.check.outputs.exists == 'false'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ matrix.release_tag }}
+          VERSION: ${{ matrix.version }}
+          OS: ${{ matrix.os }}
+          FLAVOR: ${{ matrix.flavor }}
+        run: |
+          gh release create \
+            "$RELEASE_TAG" \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "${OS} ${FLAVOR} ${VERSION} - timezone patched" \
+            --generate-notes \
+            release-assets/initrd.timezone \
+            release-assets/SHA256SUMS
