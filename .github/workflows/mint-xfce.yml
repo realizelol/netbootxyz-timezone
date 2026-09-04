@@ -84,6 +84,9 @@ jobs:
           file initrd
           ls -lh initrd
 
+      - name: Make patcher executable
+        run: chmod +x scripts/patch-initrd.sh
+
       - name: Patch initrd
         run: |
           ./scripts/patch-initrd.sh initrd initrd.timezone
